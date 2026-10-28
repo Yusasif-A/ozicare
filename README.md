@@ -51,6 +51,18 @@ WHATSAPP_DRY_RUN=1 .venv/Scripts/python -m uvicorn ozicare.main:app --port 8010
 
 Sign in as `admin@ozicare.demo` with `ADMIN_PASSWORD` from `.env`. Demo staff `navigator@ozicare.demo` and `clinician@ozicare.demo` share the same password.
 
+## Run it with Docker
+
+One image, two services: `api` (API, scheduler, webhooks) and `voice-agent` (LiveKit WhatsApp calls). Ports come from `.env` (`APP_PORT`, default 8010; `AGENT_HTTP_PORT`, default 8091). Host networking, so `APP_PORT` binds directly on the host. Secrets are passed in at run time and never baked into the image. The dashboard isn't part of the image; it's on Firebase.
+
+```bash
+docker compose up -d --build
+docker compose logs -f api
+docker compose logs -f voice-agent
+```
+
+`requirements.lock` is the exact package set from the working venv and is installed with `--no-deps`. Regenerate it after changing packages: `.venv/Scripts/python -m pip freeze > requirements.lock` (drop pytest).
+
 ## Dashboard on Firebase (project `ozi-care`)
 
 Live at **https://ozi-care.web.app**. It is a static export (`out/`), same pattern as the avalio dashboard.
