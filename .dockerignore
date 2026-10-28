@@ -1,0 +1,27 @@
+# Secrets. Compose injects the real .env at run time via env_file, so it must
+# never be copied into the image - an image layer is readable by anyone who
+# can pull it, and deleting the file in a later layer does not remove it.
+.env
+.env.*
+!.env.example
+
+.git/
+.gitignore
+.github/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+
+# The dashboard is a static site deployed to Firebase, not part of this image.
+dashboard/
+tests/
+*.md
+*.log
+*.wav
+*.mp4

@@ -1,0 +1,59 @@
+# Two processes, one image. Both must be running for WhatsApp calls to work:
+# the API takes Meta's webhook, runs the scheduler and hands calls to LiveKit,
+# and LiveKit then dispatches the call to the voice agent. With the agent down,
+# a WhatsApp call reaches a room no worker ever joins and simply rings out.
+# Text messages, the dashboard API and Bimpe phone calls only need the api.
+#
+#   docker compose up -d --build
+#   docker compose logs -f api
+#   docker compose logs -f voice-agent
+#
+# Every port comes from .env (APP_PORT, AGENT_HTTP_PORT). Compose reads that
+# file for ${...} below, and env_file passes it into the containers. It is
+# never copied into the image.
+
+x-ozicare: &ozicare
+  build:
+    context: .
+  image: ozicare:latest
+  env_file: .env
+  restart: unless-stopped
+  # Host networking, as in sahara-code-switch: both services talk outbound
+  # only (Mongo, LiveKit, Meta, ElevenLabs, Gemma, Bimpe) and never to each
+  # other, and on a shared server Docker can run out of subnets for a project
+  # network. The API port binds straight to the host for the public webhook.
+  network_mode: host
+  # The agent keeps long-lived websockets to LiveKit and ElevenLabs. Docker's
+  # default 10s stop timeout cuts a live call off mid-sentence.
+  stop_grace_period: 30s
+
+services:
+  # Dashboard API, WhatsApp webhook, Bimpe tool endpoints, and the scheduler
+  # that sends first contacts, reminders and escalations. The only service
+  # that must be reachable from outside.
+  api:
+    <<: *ozicare
+    container_name: ozicare-api
+    command: >
+      uvicorn ozicare.main:app
+      --host 0.0.0.0
+      --port ${APP_PORT:-8010}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${APP_PORT:-8010}/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # The WhatsApp voice line: LiveKit + ElevenLabs STT/TTS + Gemma, English and
+  # Arabic. Its health server listens on AGENT_HTTP_PORT.
+  voice-agent:
+    <<: *ozicare
+    container_name: ozicare-voice-agent
+    command: ["python", "-m", "ozicare.voice_agent", "start"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${AGENT_HTTP_PORT:-8091}/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3

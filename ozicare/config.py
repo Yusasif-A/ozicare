@@ -106,6 +106,8 @@ class LiveKitSettings:
     api_key: str = field(default_factory=lambda: _env("LIVEKIT_API_KEY"))
     api_secret: str = field(default_factory=lambda: _env("LIVEKIT_API_SECRET"))
     agent_name: str = field(default_factory=lambda: _env("LIVEKIT_AGENT_NAME", "ozicare-voice"))
+    # The voice agent worker's health server.
+    agent_http_port: int = field(default_factory=lambda: _int("AGENT_HTTP_PORT", 8091))
 
     @property
     def configured(self) -> bool:
