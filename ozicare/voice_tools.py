@@ -108,6 +108,7 @@ async def confirm_identity(call: dict, confirmed: bool) -> str:
     await cases.update_case(case["_id"], {"identity_confirmed": True})
     await cases.acknowledge(case, channel="voice")
     await _record(call, "identity_confirmed")
+    await cases.log_event(case["_id"], "patient", "identity_confirmed", {"consent": True, "channel": "voice"})
     s = content.screening(case["screening_type"], case["language"])
     return f"Identity confirmed. Tell them this call is about their {s['name']}, then call explain_result."
 
