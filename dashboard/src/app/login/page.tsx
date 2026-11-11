@@ -1,8 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import { getApiBase, post, saveSession, setApiBase, type User } from "@/lib/api";
+import { useState } from "react";
+import { post, saveSession, type User } from "@/lib/api";
 import { Button, ErrorNote, Field, inputCls } from "@/components/ui";
 
 export default function Login() {
@@ -11,20 +11,15 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [apiBase, setApiBaseInput] = useState("");
-  const [showApi, setShowApi] = useState(false);
-
-  useEffect(() => setApiBaseInput(getApiBase()), []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    setApiBase(apiBase);
     try {
       const res = await post<{ token: string; user: User }>("/api/auth/login", { email, password });
       saveSession(res.token, res.user);
-      router.replace("/");
+      router.replace("/board");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
     } finally {
@@ -52,17 +47,6 @@ export default function Login() {
         <Button variant="primary" className="w-full" disabled={busy}>
           {busy ? "Signing in…" : "Sign in"}
         </Button>
-        <div className="text-center text-xs text-slate-500">
-          {showApi ? (
-            <Field label="API server" hint="The OziCare backend, e.g. your ngrok https URL. Remembered in this browser.">
-              <input className={inputCls} value={apiBase} onChange={(e) => setApiBaseInput(e.target.value)} placeholder="https://…" />
-            </Field>
-          ) : (
-            <button type="button" className="hover:text-slate-800" onClick={() => setShowApi(true)}>
-              Server: {apiBase.replace(/^https?:\/\//, "")} · change
-            </button>
-          )}
-        </div>
       </form>
     </div>
   );

@@ -30,6 +30,38 @@ Every actionable screening result is communicated on WhatsApp or by phone, guide
 
 Breeze TTS was measured and dropped: ~11 s to first audio per sentence vs ~0.4 s for ElevenLabs Flash.
 
+## The five steps of the loop
+
+| Step | How OziCare does it | Code |
+|---|---|---|
+| 01 Screening result | Arrives as a FHIR Bundle from a health app or shared record, through `/api/ingest`, a CSV, or the dashboard. Patients are matched by Emirates ID. | `fhir.py` |
+| 02 Risk identified | Agreed criteria for blood pressure, diabetes, BMI, cervical (cytology/HPV), bowel (FIT) and breast (BI-RADS) set the pathway and urgency, and record the reasons. Rules can only raise a staff-set urgency, never lower it. Readings within range open no case. | `risk.py` |
+| 03 Referral initiated | The service is chosen by pathway and urgency, then a facility in the patient's region (Abu Dhabi, Al Ain or Al Dhafra) that is in their insurance network. The receiving clinician accepts, or declines with a reason, which triggers a re-referral. Clinician-to-clinician consult notes are kept on the referral. | `referrals.py` |
+| 04 Care completed | WhatsApp and voice in EN/AR, reminders, an appointment reminder that stresses why attending matters, and a link to the patient's own OziCare page. A no-show sends a kind re-booking message; a second no-show (or any urgent case) escalates to a person. | `conversation.py`, `scheduler.py` |
+| 05 Outcome tracked | Attendance comes from a FHIR `Encounter` or the dashboard, plus the overdue flag and a live lost-to-follow-up risk score with reasons. Metrics report the slide's four measures. | `cases.record_attendance`, `risk.loss_risk`, `/api/metrics` |
+
+## Patient page, and plugging into an existing health app (FHIR R4)
+
+OziCare has its own patient page (`/p?t=<token>`, English/Arabic), linked from every WhatsApp message. It asks the person to confirm who they are, then shows the result in plain words, the referral and appointment, and lets them book, ask for a call or ask a question. The token is the key, so no login is needed. `PATIENT_APP_URL` sets the link. The public home page is `/`; staff sign in at `/login` and work from `/board`.
+
+OziCare is **not connected to Sahatna** or any national app. The patient page shows what the loop looks like inside such an app, and the FHIR endpoints below are how a real integration would work: OziCare stays the engine that owns each result until it's closed. All endpoints use the `INGEST_API_KEY` bearer key; the read endpoints also accept a staff login.
+
+| Direction | Endpoint | What |
+|---|---|---|
+| In | `POST /fhir/Bundle` | Patient (+ Emirates ID, language, address) + LOINC Observations + Coverage → risk rules → case + referral + first WhatsApp |
+| In | `POST /fhir/Encounter` | `basedOn: ServiceRequest/<case>`: `finished` = attended; `cancelled` + no-show reason = re-book |
+| Out | `GET /fhir/ServiceRequest/{case}` | The referral, for the receiving facility |
+| Out | `GET /fhir/Appointment/{case}` | The booking, for the health app to show |
+| Out | `GET /fhir/Task/{case}` | Loop status, for the health app to show |
+| — | `GET /fhir/metadata`, `GET /fhir/example` | Capability statement, and a sample Bundle you can POST straight back |
+
+```bash
+curl -s https://ozicare.publicaai.com/fhir/example > b.json   # edit the phone first
+curl -X POST https://ozicare.publicaai.com/fhir/Bundle -H "Authorization: Bearer $INGEST_API_KEY" -H "Content-Type: application/json" -d @b.json
+```
+
+The facility directory and insurance networks in `referrals.py` are demo data with generic names; a pilot swaps in the DoH facility registry and the payers' network lists. The FHIR contract is standard R4; wiring it to a specific app needs that app's onboarding.
+
 ## Run it
 
 ```bash
@@ -73,7 +105,7 @@ npm run build
 firebase deploy --only hosting      # .firebaserc already points at ozi-care
 ```
 
-The dashboard calls the API from the browser. The default is `http://localhost:8010`. To use another backend (e.g. an ngrok URL), click **"Server: … · change"** on the login page; it is remembered in that browser, so a new ngrok URL needs no redeploy. When the site talks to a backend on your own laptop, Chrome/Edge asks once to **allow access to the local network**: click Allow.
+The site calls the API from the browser. The address is fixed at build time: `dashboard/.env.production` (`NEXT_PUBLIC_API_URL=https://ozicare.publicaai.com`) for the deployed site, `dashboard/.env.local` (`http://localhost:8010`) for `npm run dev`. To point the site at a different backend, change it there and redeploy.
 
 ## Going live — what still needs a human
 

@@ -50,3 +50,4 @@ async def ensure_indexes() -> None:
     await d.events.create_index([("case_id", ASCENDING), ("created_at", ASCENDING)])
     await d.staff_users.create_index("email", unique=True)
     await d.calls.create_index("keys")
+    await d.cases.create_index("patient_token", unique=True, sparse=True)

@@ -26,7 +26,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import auth, bimpe, cases, content, conversation, scheduler, voice_tools, wa_calls, whatsapp
+from . import auth, bimpe, cases, content, conversation, demo, fhir, patient_app, referrals, risk, scheduler, voice_tools, wa_calls, whatsapp
 from .config import settings
 from .db import close, db, ensure_indexes, now
 
@@ -62,6 +62,7 @@ app.add_middleware(
     allow_private_network=True,
 )
 app.include_router(voice_tools.router)
+app.include_router(patient_app.router)
 
 
 Staff = Annotated[dict, Depends(auth.require("viewer"))]
@@ -132,12 +133,18 @@ class NewCase(BaseModel):
     phone: str
     display_name: str
     language: str = "en"
-    screening_type: str
-    urgency: str = "routine"
+    # Either readings (the risk rules choose pathway and urgency) or a
+    # screening_type + urgency chosen by staff, or both.
+    screening_type: str = ""
+    urgency: str = ""
     result_summary: str = ""
     source: str = "demo"
     location: str = ""
     external_ref: str = ""
+    emirates_id: str = ""
+    region: str = ""
+    insurance: str = ""
+    readings: dict = Field(default_factory=dict)
 
 
 async def _contact_now(case_id: str) -> None:
@@ -155,7 +162,17 @@ async def meta(_: Staff) -> dict:
         "statuses": cases.STATUSES,
         "close_statuses": cases.CLOSED,
         "channels": {"whatsapp": settings.whatsapp.configured, "phone_call": settings.bimpe.configured, "whatsapp_call": settings.livekit.configured},
+        "readings": risk.READINGS,
+        "pathways": risk.PATHWAY_LABELS,
+        "rules": risk.rules_table(),
+        **referrals.directory(),
     }
+
+
+@app.post("/api/assess")
+async def assess_readings(body: dict, _: Staff) -> dict:
+    """Preview what the agreed criteria say about a set of readings."""
+    return risk.assess(body.get("readings") or body)
 
 
 @app.post("/api/cases")
@@ -170,7 +187,9 @@ async def create_case(body: NewCase, user: Navigator, bg: BackgroundTasks) -> di
 
 @app.post("/api/cases/import")
 async def import_cases(file: UploadFile, user: Navigator, bg: BackgroundTasks) -> dict:
-    """CSV columns: phone, display_name, screening_type, urgency, language, result_summary, source, location, external_ref"""
+    """CSV columns: phone, display_name, screening_type, urgency, language, result_summary, source, location, external_ref,
+    emirates_id, region, insurance, and any reading key (systolic, diastolic, hba1c, fasting_glucose, random_glucose, bmi,
+    cervical_cytology, fit, birads)."""
     text = (await file.read()).decode("utf-8-sig")
     created, errors = [], []
     for i, row in enumerate(csv.DictReader(io.StringIO(text)), start=2):
@@ -180,11 +199,15 @@ async def import_cases(file: UploadFile, user: Navigator, bg: BackgroundTasks) -
                 display_name=row.get("display_name") or row.get("name", ""),
                 language=(row.get("language") or "en").strip().lower(),
                 screening_type=(row.get("screening_type") or "").strip(),
-                urgency=(row.get("urgency") or "routine").strip().lower(),
+                urgency=(row.get("urgency") or "").strip().lower(),
                 result_summary=row.get("result_summary", ""),
                 source=row.get("source") or "csv",
                 location=row.get("location", ""),
                 external_ref=row.get("external_ref", ""),
+                emirates_id=row.get("emirates_id", ""),
+                region=(row.get("region") or "").strip().lower(),
+                insurance=(row.get("insurance") or "").strip(),
+                readings={k: row[k] for k in risk.READINGS if (row.get(k) or "").strip()},
                 actor="staff",
                 actor_id=user["_id"],
             )
@@ -363,6 +386,93 @@ async def call_patient(case_id: str, user: Navigator, channel: str = "phone") ->
         raise HTTPException(502, str(exc)) from exc
 
 
+@app.post("/api/cases/{case_id}/outreach")
+async def outreach(case_id: str, user: Navigator, channel: str = "whatsapp") -> dict:
+    """One click: WhatsApp message, then a call (channel=whatsapp|phone|none)."""
+    case = await _case_or_404(case_id)
+    if case["status"] in cases.CLOSED:
+        raise HTTPException(409, "case is closed")
+    return await demo.outreach(case, channel=channel, actor_id=user["_id"])
+
+
+class DemoReset(BaseModel):
+    phone: str = ""
+    name: str = ""
+    language: str = ""
+
+
+@app.post("/api/demo/reset")
+async def demo_reset(body: DemoReset, _: Admin) -> dict:
+    """Wipe cases and fill the board with demo data (admin only)."""
+    try:
+        return await demo.reset(phone=body.phone, name=body.name, lang=body.language)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+class Attendance(BaseModel):
+    attended: bool
+    note: str = ""
+
+
+@app.post("/api/cases/{case_id}/attendance")
+async def attendance(case_id: str, body: Attendance, user: Navigator) -> dict:
+    """Attended -> in_care; no-show -> re-booking outreach (and escalation on a repeat)."""
+    case = await _case_or_404(case_id)
+    try:
+        case = await cases.record_attendance(case, body.attended, actor="staff", actor_id=user["_id"], note=body.note)
+    except cases.TransitionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if body.attended:
+        await conversation.say(case, content.t("attended_thanks", case["language"], first_name=cases.first_name(case["patient_name"])), meta={"kind": "attended"})
+    return cases.public(case)
+
+
+class ReferralResponse(BaseModel):
+    accept: bool
+    note: str = ""
+
+
+@app.post("/api/cases/{case_id}/referral/respond")
+async def referral_respond(case_id: str, body: ReferralResponse, user: Annotated[dict, Depends(auth.require("clinician"))]) -> dict:
+    """Receiving clinician accepts or declines (declining needs a reason)."""
+    case = await _case_or_404(case_id)
+    try:
+        return cases.public(await referrals.respond(case, body.accept, staff=user, note=body.note))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/cases/{case_id}/referral/consult")
+async def referral_consult(case_id: str, body: Note, user: Navigator) -> dict:
+    """Clinician-to-clinician (or navigator-to-clinician) note on the referral."""
+    case = await _case_or_404(case_id)
+    if not body.text.strip():
+        raise HTTPException(400, "empty note")
+    try:
+        return cases.public(await referrals.consult(case, staff=user, text=body.text))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class ReRefer(BaseModel):
+    facility_id: str | None = None
+    service: str | None = None
+    note: str = ""
+
+
+@app.post("/api/cases/{case_id}/referral/resend")
+async def referral_resend(case_id: str, body: ReRefer, user: Navigator) -> dict:
+    """Send the referral on to a chosen facility, or the next suitable one."""
+    case = await _case_or_404(case_id)
+    if case["status"] in cases.CLOSED:
+        raise HTTPException(409, "case is closed")
+    try:
+        return cases.public(await referrals.re_refer(case, staff=user, facility_id=body.facility_id, service=body.service, note=body.note))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/calls/{call_id}")
 async def call_detail(call_id: str, _: Staff) -> dict:
     call = await db().calls.find_one({"_id": call_id})
@@ -389,14 +499,28 @@ async def export_audit(_: Admin, case_id: str | None = None) -> Response:
 
 @app.get("/api/metrics")
 async def metrics(_: Staff) -> dict:
-    total = contacted = acked = booked = 0
+    """
+    The slide's measurable loop: referral completion, time to assessment,
+    treatment completion, lost-to-follow-up risk; plus the operational funnel.
+    """
+    total = contacted = acked = booked = attended = completed = 0
     first_contact_minutes: list[float] = []
+    assessment_hours: list[float] = []
     closed_by_reason: dict[str, int] = {}
     by_status: dict[str, int] = {}
-    open_overdue = urgent_open = 0
-    async for c in db().cases.find({}, {"status": 1, "created_at": 1, "first_contact_at": 1, "acknowledged_at": 1, "booked_at": 1, "closed_reason": 1, "overdue": 1, "urgency": 1}):
+    by_pathway: dict[str, dict] = {}
+    by_region: dict[str, dict] = {}
+    open_overdue = urgent_open = no_shows = 0
+    referrals_sent = referrals_accepted = referrals_declined = 0
+    risk_levels = {"high": 0, "medium": 0, "low": 0}
+    at_risk: list[dict] = []
+    async for c in db().cases.find({}):
         total += 1
         by_status[c["status"]] = by_status.get(c["status"], 0) + 1
+        pw = by_pathway.setdefault(c.get("pathway") or "general", {"cases": 0, "attended": 0, "completed": 0, "lost": 0})
+        rg = by_region.setdefault(c.get("region") or "abu_dhabi", {"cases": 0, "attended": 0, "open": 0})
+        pw["cases"] += 1
+        rg["cases"] += 1
         if c.get("first_contact_at"):
             contacted += 1
             first_contact_minutes.append((c["first_contact_at"] - c["created_at"]).total_seconds() / 60)
@@ -404,27 +528,65 @@ async def metrics(_: Staff) -> dict:
             acked += 1
         if c.get("booked_at"):
             booked += 1
+        if c.get("attended_at"):
+            attended += 1
+            pw["attended"] += 1
+            rg["attended"] += 1
+            assessment_hours.append((c["attended_at"] - c["created_at"]).total_seconds() / 3600)
+        if c["status"] == "closed_completed":
+            completed += 1
+            pw["completed"] += 1
+        if c["status"] == "closed_lost":
+            pw["lost"] += 1
+        no_shows += c.get("no_show_count") or 0
+        ref = c.get("referral") or {}
+        if ref:
+            referrals_sent += 1
+            referrals_accepted += ref.get("status") == "accepted"
+            referrals_declined += ref.get("status") == "declined"
         if c.get("closed_reason"):
             closed_by_reason[c["closed_reason"]] = closed_by_reason.get(c["closed_reason"], 0) + 1
         if c["status"] in cases.OPEN:
+            rg["open"] += 1
             open_overdue += bool(c.get("overdue"))
             urgent_open += c["urgency"] == "urgent"
+            lr = risk.loss_risk(c)
+            if lr["level"] in risk_levels:
+                risk_levels[lr["level"]] += 1
+            if lr["level"] in ("high", "medium"):
+                at_risk.append({"id": c["_id"], "patient_name": c["patient_name"], "urgency": c["urgency"], "status": c["status"], **lr})
 
     def pct(n: int, d: int) -> float | None:
         return round(100 * n / d, 1) if d else None
 
-    fc = sorted(first_contact_minutes)
+    def med(xs: list[float]) -> float | None:
+        xs = sorted(xs)
+        return round(xs[len(xs) // 2], 2) if xs else None
+
+    fc = first_contact_minutes
     closed = sum(closed_by_reason.values())
+    at_risk.sort(key=lambda r: -r["score"])
     return {
         "total_cases": total,
-        "time_to_first_contact_min": {"median": round(fc[len(fc) // 2], 2) if fc else None, "avg": round(sum(fc) / len(fc), 2) if fc else None},
+        # The slide's four measures
+        "referral_completion_rate": pct(attended, referrals_sent),
+        "time_to_assessment_hours": {"median": med(assessment_hours), "avg": round(sum(assessment_hours) / len(assessment_hours), 1) if assessment_hours else None},
+        "treatment_completion_rate": pct(completed, attended),
+        "loss_risk": {**risk_levels, "top": at_risk[:10]},
+        # Funnel
+        "time_to_first_contact_min": {"median": med(fc), "avg": round(sum(fc) / len(fc), 2) if fc else None},
         "acknowledgement_rate": pct(acked, contacted),
         "booking_rate": pct(booked, contacted),
+        "attendance_rate": pct(attended, booked),
+        "no_shows": no_shows,
         "closure_rate": pct(closed, total),
+        "referrals": {"sent": referrals_sent, "accepted": referrals_accepted, "declined": referrals_declined},
         "closed_by_reason": closed_by_reason,
         "open_overdue": open_overdue,
         "urgent_open": urgent_open,
         "by_status": by_status,
+        "by_pathway": by_pathway,
+        "by_region": by_region,
     }
 
 
@@ -450,7 +612,87 @@ async def ingest(body: NewCase, bg: BackgroundTasks, authorization: Annotated[st
 
 
 # --------------------------------------------------------------------------
-# Meta webhook
+# FHIR R4 connector (for a national health app / shared health record)
+# --------------------------------------------------------------------------
+
+
+def _ingest_key(authorization: str | None) -> None:
+    if not settings.app.ingest_api_key:
+        raise HTTPException(503, "INGEST_API_KEY is not set")
+    if authorization != f"Bearer {settings.app.ingest_api_key}":
+        raise HTTPException(401, "bad or missing ingest key")
+
+
+def _outcome(status: int, text: str) -> Response:
+    body = {"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "processing", "diagnostics": text}]}
+    return Response(json.dumps(body), status_code=status, media_type="application/fhir+json")
+
+
+def _fhir(body: dict) -> Response:
+    return Response(json.dumps(body, ensure_ascii=False, default=str), media_type="application/fhir+json")
+
+
+@app.get("/fhir/metadata", tags=["fhir"])
+async def fhir_metadata() -> Response:
+    return _fhir(fhir.capability())
+
+
+@app.get("/fhir/example", tags=["fhir"])
+async def fhir_example() -> Response:
+    """A sample screening Bundle you can POST back to /fhir/Bundle."""
+    return _fhir(fhir.example_bundle())
+
+
+@app.post("/fhir/Bundle", tags=["fhir"])
+async def fhir_bundle(request: Request, bg: BackgroundTasks, authorization: Annotated[str | None, Header()] = None) -> Response:
+    _ingest_key(authorization)
+    bundle = await request.json()
+    ref = (bundle.get("identifier") or {}).get("value")
+    if ref and await db().cases.find_one({"external_ref": ref, "source": "fhir"}):
+        return _outcome(409, f"a case for bundle {ref} already exists")
+    try:
+        result = await fhir.ingest_bundle(bundle)
+    except ValueError as exc:
+        return _outcome(400, str(exc))
+    if result.get("case_id"):
+        bg.add_task(_contact_now, result["case_id"])
+    return Response(json.dumps(result, default=str), status_code=201 if result.get("case_id") else 200, media_type="application/json")
+
+
+@app.post("/fhir/Encounter", tags=["fhir"])
+async def fhir_encounter(request: Request, authorization: Annotated[str | None, Header()] = None) -> Response:
+    _ingest_key(authorization)
+    try:
+        result = await fhir.apply_encounter(await request.json())
+    except (ValueError, cases.TransitionError) as exc:
+        return _outcome(409, str(exc))
+    case = await cases.get_case(result["case_id"])
+    if case and case["status"] == "in_care":
+        await conversation.say(case, content.t("attended_thanks", case["language"], first_name=cases.first_name(case["patient_name"])), meta={"kind": "attended"})
+    return Response(json.dumps(result), media_type="application/json")
+
+
+async def _fhir_case(case_id: str, authorization: str | None) -> dict:
+    # Facilities use the ingest key; staff can read with their login token.
+    if authorization != f"Bearer {settings.app.ingest_api_key}" or not settings.app.ingest_api_key:
+        await auth.current_user(authorization)
+    return await _case_or_404(case_id.upper())
+
+
+@app.get("/fhir/ServiceRequest/{case_id}", tags=["fhir"])
+async def fhir_service_request(case_id: str, authorization: Annotated[str | None, Header()] = None) -> Response:
+    return _fhir(fhir.service_request(await _fhir_case(case_id, authorization)))
+
+
+@app.get("/fhir/Appointment/{case_id}", tags=["fhir"])
+async def fhir_appointment(case_id: str, authorization: Annotated[str | None, Header()] = None) -> Response:
+    appt = fhir.appointment(await _fhir_case(case_id, authorization))
+    return _fhir(appt) if appt else _outcome(404, "no appointment booked yet")
+
+
+@app.get("/fhir/Task/{case_id}", tags=["fhir"])
+async def fhir_task(case_id: str, authorization: Annotated[str | None, Header()] = None) -> Response:
+    return _fhir(fhir.task(await _fhir_case(case_id, authorization)))
 # --------------------------------------------------------------------------
 
 WEBHOOK_PATHS = ("/webhook/whatsapp", "/whatsapp")

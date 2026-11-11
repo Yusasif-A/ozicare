@@ -17,7 +17,7 @@ import logging
 import re
 from datetime import timedelta
 
-from . import cases, content, guard, llm, whatsapp
+from . import cases, content, guard, llm, referrals, whatsapp
 from .config import settings
 from .content import t
 from .db import db, now
@@ -98,12 +98,22 @@ async def contact_patient(case: dict, *, reminder: bool = False) -> bool:
     org = settings.app.org_name
     template = settings.whatsapp.template_ar if lang == "ar" else settings.whatsapp.template_en
 
-    if reminder:
+    if case.get("next_action") == "missed_appointment":
+        # After a no-show: a kind re-booking message, not the generic reminder.
+        text, template = t("missed_appointment", lang, first_name=fname), ""
+    elif reminder:
         text = t("reminder", lang, first_name=fname, org=org)
     else:
         text = t("first_contact", lang, first_name=fname, org=org)
         if case["urgency"] == "urgent":
             text += t("urgent_suffix", lang)
+    # The patient page is the same loop with buttons; the link carries no
+    # result details, and the page asks who they are before showing any.
+    from .patient_app import ensure_token, link_for
+
+    await ensure_token(case)
+    if link_for(case):
+        text += t("app_link", lang, link=link_for(case))
 
     pid = None
     if template:
@@ -283,7 +293,7 @@ async def _run_intent(case: dict, intent: str | None, text: str) -> None:
         case = await cases.acknowledge(case)
         slots = cases.next_slots(lang)
         await cases.update_case(case["_id"], {"conv_state": "await_slot", "offered_slots": slots})
-        clinic = content.CLINIC[lang]["name"]
+        clinic = referrals.clinic_for(case, lang)["name"]
         lines = "\n".join(f"{i}. {s['label']}" for i, s in enumerate(slots, 1))
         body = f"{t('slots_intro', lang, clinic=clinic)}\n\n{lines}\n\n{t('slots_other', lang)}"
         buttons = [(f"slot_{i}", s["label"].replace(" الساعة", "")) for i, s in enumerate(slots)]
@@ -311,7 +321,7 @@ async def _run_intent(case: dict, intent: str | None, text: str) -> None:
     case = await cases.acknowledge(case)
     history = await _llm_history(case["_id"])
     reply, audit = await llm.answer_question(
-        text, lang=lang, screening_type=case["screening_type"], result_summary=case.get("result_summary", ""), history=history
+        text, lang=lang, screening_type=case["screening_type"], result_summary=case.get("result_summary", ""), history=history, clinic=referrals.clinic_for(case, lang)
     )
     if reply is None:
         await say(case, t("fallback", lang), buttons=_menu_buttons(lang), meta={"kind": "fallback", "ai": audit})
@@ -341,8 +351,19 @@ def _chosen_slot(case: dict, norm: str, button_id: str | None) -> dict | None:
 
 
 async def _confirm_booking(case: dict, slot: dict) -> None:
-    lang = case["language"]
     case = await cases.book(case, slot, actor="patient", channel="whatsapp")
+    await say(case, booked_text(case), meta={"kind": "booked"})
+
+
+def booked_text(case: dict) -> str:
+    """Booking confirmation, with the patient page link when one is configured."""
+    from .patient_app import link_for
+
+    lang = case["language"]
     appt = case["appointment"]
     s = content.screening(case["screening_type"], lang)
-    await say(case, t("booked", lang, slot=appt["label"], clinic=appt["clinic"], address=appt["address"], bring=s["bring"]), meta={"kind": "booked"})
+    text = t("booked", lang, slot=appt["label"], clinic=appt["clinic"], address=appt["address"], bring=s["bring"])
+    link = link_for(case)
+    if link:
+        text += "\n\n" + t("page_link", lang, link=link)
+    return text

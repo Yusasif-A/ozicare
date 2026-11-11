@@ -1,26 +1,10 @@
-const DEFAULT_API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010";
-const API_KEY = "ozicare.api";
+// Fixed at build time: .env.production for the deployed site, .env.local for dev.
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010").replace(/\/+$/, "");
 const TOKEN_KEY = "ozicare.token";
 const USER_KEY = "ozicare.user";
 
-/**
- * The API address can be changed on the login page and is remembered per
- * browser, so a new ngrok URL does not need a rebuild and redeploy.
- */
 export function getApiBase(): string {
-  try {
-    return localStorage.getItem(API_KEY) || DEFAULT_API;
-  } catch {
-    return DEFAULT_API;
-  }
-}
-
-export function setApiBase(url: string) {
-  const clean = url.trim().replace(/\/+$/, "");
-  try {
-    if (clean && clean !== DEFAULT_API) localStorage.setItem(API_KEY, clean);
-    else localStorage.removeItem(API_KEY);
-  } catch {}
+  return API_BASE;
 }
 
 export type User = { id: string; name: string; email: string; role: string };
@@ -50,11 +34,50 @@ export type Case = {
   first_contact_at: string | null;
   acknowledged_at: string | null;
   booked_at: string | null;
+  attended_at?: string | null;
   closed_reason: string | null;
   closed_at: string | null;
   created_at: string;
   updated_at: string;
+  emirates_id?: string;
+  region?: string;
+  insurance?: string;
+  pathway?: string;
+  readings?: Record<string, string | number>;
+  risk_findings?: Finding[];
+  referral?: Referral | null;
+  no_show_count?: number;
+  next_action?: string;
+  loss_risk: LossRisk;
+  patient_link?: string;
 };
+
+export type Finding = { pathway: string; urgency: string; reason: string };
+
+export type LossRisk = { score: number; level: "none" | "low" | "medium" | "high"; reasons: string[] };
+
+export type Referral = {
+  id: string;
+  service: string;
+  service_label: string;
+  facility_id: string | null;
+  facility_name: string | null;
+  facility_region: string | null;
+  patient_region: string;
+  insurance: string;
+  network_ok: boolean;
+  status: "sent" | "accepted" | "declined" | "no_facility";
+  sent_at: string;
+  responded_at: string | null;
+  responder: string | null;
+  response_note: string;
+  consult: { by: string; role: string; text: string; at: string }[];
+  previous: { facility_name: string; status: string; response_note: string; responder: string | null }[];
+};
+
+export type Facility = { id: string; name: string; address: string; region: string; region_label: string; services: string[]; networks: string[] };
+
+export type Assessment = { actionable: boolean; urgency: string | null; pathway: string | null; screening_type: string | null; findings: Finding[] };
 
 export type Message = {
   id: string;
@@ -100,6 +123,13 @@ export type Meta = {
   statuses: string[];
   close_statuses: string[];
   channels: { whatsapp: boolean; phone_call: boolean; whatsapp_call: boolean };
+  readings: Record<string, string>;
+  pathways: Record<string, string>;
+  rules: { pathway: string; pathway_label: string; urgency: string; criterion: string }[];
+  regions: Record<string, string>;
+  insurances: string[];
+  services: Record<string, string>;
+  facilities: Facility[];
 };
 
 export function getToken(): string | null {

@@ -76,6 +76,7 @@ async def answer_question(
     screening_type: str,
     result_summary: str,
     history: list[dict] | None = None,
+    clinic: dict | None = None,
 ) -> tuple[str | None, dict]:
     """
     Returns (reply or None, audit). None means "use the template fallback":
@@ -84,7 +85,7 @@ async def answer_question(
     system = ANSWER_PROMPT.format(
         org=settings.app.org_name,
         language=LANG_NAMES.get(lang, "English"),
-        knowledge=content.knowledge_for_llm(screening_type, lang, result_summary),
+        knowledge=content.knowledge_for_llm(screening_type, lang, result_summary, clinic),
     )
     messages = [{"role": "system", "content": system}]
     for turn in (history or [])[-6:]:

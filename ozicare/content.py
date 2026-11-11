@@ -112,6 +112,102 @@ SCREENING: dict[str, dict[str, dict]] = {
             "warning": "نزيف شديد أو ألم شديد في أسفل البطن",
         },
     },
+    "obesity": {
+        "en": {
+            "name": "weight and BMI screening",
+            "explain": (
+                "Your weight and height at the screening put your body mass index (BMI) above the healthy range. "
+                "BMI is only a starting point, not a diagnosis. A health worker can check related things like "
+                "blood pressure and blood sugar and talk with you about support that fits your life."
+            ),
+            "next_steps": [
+                "Visit the clinic for a review with a nurse or doctor.",
+                "They may check your blood pressure, blood sugar and cholesterol.",
+                "You can ask about support programmes for healthy weight.",
+            ],
+            "bring": "Your ID, this message, and a list of any medicines you take.",
+            "warning": "chest pain, difficulty breathing, or fainting",
+        },
+        "ar": {
+            "name": "فحص الوزن ومؤشر كتلة الجسم",
+            "explain": (
+                "أظهر وزنك وطولك في الفحص أن مؤشر كتلة الجسم لديك أعلى من المعدل الصحي. "
+                "مؤشر كتلة الجسم نقطة بداية فقط وليس تشخيصاً. يمكن لأحد العاملين الصحيين فحص أمور مرتبطة "
+                "مثل ضغط الدم وسكر الدم والتحدث معك عن دعم يناسب حياتك."
+            ),
+            "next_steps": [
+                "زيارة العيادة لمراجعة مع الممرض أو الطبيب.",
+                "قد يقيسون ضغط الدم وسكر الدم والكوليسترول.",
+                "يمكنك السؤال عن برامج الدعم للوصول إلى وزن صحي.",
+            ],
+            "bring": "هويتك، وهذه الرسالة، وقائمة بأي أدوية تتناولها.",
+            "warning": "ألم في الصدر، أو صعوبة في التنفس، أو إغماء",
+        },
+    },
+    "colorectal": {
+        "en": {
+            "name": "bowel (colorectal) screening",
+            "explain": (
+                "Your bowel screening stool test found a small amount of blood that needs a closer look. "
+                "This does not mean you have cancer: most people with this result do not. "
+                "The usual next step is a test called a colonoscopy, which lets a specialist look and treat early if needed."
+            ),
+            "next_steps": [
+                "Book the follow-up appointment with the specialist clinic.",
+                "The clinic will explain how to prepare for the test.",
+                "Early follow-up is what makes bowel screening work.",
+            ],
+            "bring": "Your ID, this message, and a list of any medicines you take.",
+            "warning": "heavy bleeding from your bottom, severe belly pain, or fainting",
+        },
+        "ar": {
+            "name": "فحص الأمعاء (القولون والمستقيم)",
+            "explain": (
+                "أظهر فحص البراز الخاص بالأمعاء وجود كمية صغيرة من الدم تحتاج إلى فحص أدق. "
+                "هذا لا يعني أنك مصاب بالسرطان، فمعظم من لديهم هذه النتيجة ليسوا كذلك. "
+                "الخطوة المعتادة التالية هي فحص يسمى تنظير القولون، يتيح للطبيب المختص الفحص والعلاج المبكر إذا لزم الأمر."
+            ),
+            "next_steps": [
+                "حجز موعد المتابعة في العيادة التخصصية.",
+                "ستشرح لك العيادة كيفية الاستعداد للفحص.",
+                "المتابعة المبكرة هي ما يجعل فحص الأمعاء فعالاً.",
+            ],
+            "bring": "هويتك، وهذه الرسالة، وقائمة بأي أدوية تتناولها.",
+            "warning": "نزيف شديد من فتحة الشرج، أو ألم شديد في البطن، أو إغماء",
+        },
+    },
+    "breast": {
+        "en": {
+            "name": "breast screening (mammogram)",
+            "explain": (
+                "Your mammogram showed an area the specialists would like to look at more closely. "
+                "Most people called back after a mammogram do not have cancer. "
+                "Extra pictures or a small test at a breast clinic will give a clear answer."
+            ),
+            "next_steps": [
+                "Book the follow-up appointment at the breast clinic.",
+                "You may have more imaging, an ultrasound, or a small sample taken.",
+                "A specialist will explain the result and any next steps.",
+            ],
+            "bring": "Your ID and this message.",
+            "warning": "severe pain, a hot swollen breast with fever, or bleeding from the nipple",
+        },
+        "ar": {
+            "name": "فحص الثدي (الماموغرام)",
+            "explain": (
+                "أظهر فحص الماموغرام منطقة يرغب المختصون في فحصها عن قرب. "
+                "معظم من يُطلب منهم العودة بعد الماموغرام لا يكون لديهم سرطان. "
+                "صور إضافية أو فحص بسيط في عيادة الثدي سيعطي إجابة واضحة."
+            ),
+            "next_steps": [
+                "حجز موعد المتابعة في عيادة الثدي.",
+                "قد تُجرى لك صور إضافية أو أشعة بالموجات فوق الصوتية أو أخذ عينة صغيرة.",
+                "سيشرح لك الطبيب المختص النتيجة وأي خطوات تالية.",
+            ],
+            "bring": "هويتك وهذه الرسالة.",
+            "warning": "ألم شديد، أو احمرار وتورم في الثدي مع حمى، أو نزيف من الحلمة",
+        },
+    },
     "general_abnormal": {
         "en": {
             "name": "health screening",
@@ -248,8 +344,28 @@ TEXT: dict[str, dict[str, str]] = {
         "ar": "مرحباً {first_name}، تذكير من {org}: ما زالت متابعة فحصك تحتاج إلى اهتمامك.\n\nأرسل ١ للشرح، أو ٢ للحجز، أو ٣ لنتصل بك.",
     },
     "appointment_reminder": {
-        "en": "Reminder: your follow-up appointment is {slot} at {clinic}. Reply 3 if you need to change it.",
-        "ar": "تذكير: موعد المتابعة الخاص بك {slot} في {clinic}. أرسل ٣ إذا احتجت إلى تغييره.",
+        "en": "Reminder: your follow-up appointment is {slot} at {clinic}. Going to this visit is the step that matters most: it is how a clinician can check your result and help early. Reply 3 if you need to change it.",
+        "ar": "تذكير: موعد المتابعة الخاص بك {slot} في {clinic}. حضور هذه الزيارة هو الخطوة الأهم، فهي التي تتيح للطبيب فحص نتيجتك ومساعدتك مبكراً. أرسل ٣ إذا احتجت إلى تغييره.",
+    },
+    "missed_appointment": {
+        "en": "Hello {first_name}, we noticed you could not make your follow-up appointment. That's okay, it happens. Your result still needs a check, so let's find a new time.\n\nReply 2 to book again, or 3 to talk to us.",
+        "ar": "مرحباً {first_name}، لاحظنا أنك لم تتمكن من حضور موعد المتابعة. لا بأس، هذا يحدث. ما زالت نتيجتك بحاجة إلى فحص، فلنجد موعداً جديداً.\n\nأرسل ٢ للحجز مرة أخرى، أو ٣ للتحدث معنا.",
+    },
+    "attended_thanks": {
+        "en": "Thank you for attending your appointment, {first_name}. Your care team will guide you on any next steps.",
+        "ar": "شكراً لحضورك موعدك يا {first_name}. سيرشدك فريق الرعاية بشأن أي خطوات تالية.",
+    },
+    "page_link": {
+        "en": "Your appointment and next steps are in your OziCare page: {link}",
+        "ar": "موعدك وخطواتك التالية في صفحتك على أوزي كير: {link}",
+    },
+    "app_link": {
+        "en": "\n\nOr open your OziCare page: {link}",
+        "ar": "\n\nأو افتح صفحتك على أوزي كير: {link}",
+    },
+    "app_fallback": {
+        "en": "I can't answer that here, but a member of our care team can. Tap \"Call me\" and someone will contact you.",
+        "ar": "لا أستطيع الإجابة عن ذلك هنا، لكن يمكن لأحد أعضاء فريق الرعاية مساعدتك. اضغط \"اتصل بي\" وسيتواصل معك أحدهم.",
     },
     "fallback": {
         "en": "I'm not able to answer that here, but a member of our care team can. Reply HUMAN to be contacted, or choose an option:\n1 — Explain my result\n2 — Help me book\n3 — Call me",
@@ -304,10 +420,10 @@ def explanation(screening_type: str, lang: str, result_summary: str = "") -> str
     return "\n\n".join(parts)
 
 
-def knowledge_for_llm(screening_type: str, lang: str, result_summary: str) -> str:
+def knowledge_for_llm(screening_type: str, lang: str, result_summary: str, clinic: dict | None = None) -> str:
     """Everything the LLM may draw on for one case, and nothing else."""
     s = screening(screening_type, lang)
-    clinic = CLINIC[lang if lang in LANGS else "en"]
+    clinic = clinic or CLINIC[lang if lang in LANGS else "en"]
     return "\n".join(
         [
             f"Screening: {s['name']}",

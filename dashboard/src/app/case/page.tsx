@@ -4,9 +4,9 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import Shell from "@/components/Shell";
-import { Button, Card, ErrorNote, OverduePill, StatusPill, UrgencyPill, inputCls } from "@/components/ui";
-import { api, post, type CaseDetail, type Event, type Message, type Meta, type User } from "@/lib/api";
-import { ACTION_LABEL, SCREENING_LABEL, STATUS_LABEL, ago, isClosed, when } from "@/lib/format";
+import { Button, Card, ErrorNote, OverduePill, RiskPill, StatusPill, UrgencyPill, inputCls } from "@/components/ui";
+import { api, getUser, post, type CaseDetail, type Event, type Message, type Meta, type User } from "@/lib/api";
+import { ACTION_LABEL, PATHWAY_LABEL, REFERRAL_STYLE, REGION_LABEL, SCREENING_LABEL, STATUS_LABEL, ago, isClosed, when } from "@/lib/format";
 
 type Item = { kind: "msg"; at: string; msg: Message } | { kind: "event"; at: string; ev: Event };
 
@@ -58,6 +58,22 @@ function eventText(ev: Event): string {
       return "Bot paused — staff handling conversation";
     case "ai_resumed":
       return "Bot resumed";
+    case "risk_assessed":
+      return `Risk rules: ${PATHWAY_LABEL[p.pathway as string] ?? p.pathway} · ${p.urgency}`;
+    case "referral_sent":
+      return `${p.re_referral ? "Re-referred" : "Referral sent"}: ${p.service} → ${p.facility ?? "no facility found"}${p.network_ok === false ? " (out of network)" : ""}`;
+    case "referral_accepted":
+      return `Referral accepted by ${p.by} at ${p.facility}`;
+    case "referral_declined":
+      return `Referral declined by ${p.by}: ${p.note}`;
+    case "consult_note":
+      return `Consult · ${p.by}: ${p.text}`;
+    case "attended":
+      return `Attended ${p.appointment ?? "appointment"}`;
+    case "no_show":
+      return `Did not attend ${p.appointment ?? ""} (no-show #${p.count})`;
+    case "fhir_ingested":
+      return `Received from health record (FHIR) · ${p.findings}`;
     default:
       return ev.type.replaceAll("_", " ");
   }
@@ -70,6 +86,12 @@ const EVENT_TONE: Record<string, string> = {
   overdue: "text-red-700",
   booked: "text-teal-700",
   identity_confirmed: "text-teal-700",
+  attended: "text-emerald-700",
+  referral_accepted: "text-emerald-700",
+  no_show: "text-red-700",
+  referral_declined: "text-red-700",
+  risk_assessed: "text-indigo-700",
+  consult_note: "text-indigo-700",
 };
 
 function Bubble({ m }: { m: Message }) {
@@ -117,6 +139,137 @@ export default function CasePage() {
     <Suspense fallback={null}>
       <CaseView />
     </Suspense>
+  );
+}
+
+function ReferralCard({
+  caseId,
+  c,
+  meta,
+  busy,
+  act,
+  closed,
+}: {
+  caseId: string;
+  c: CaseDetail["case"];
+  meta: Meta | null;
+  busy: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<void>;
+  closed: boolean;
+}) {
+  const ref = c.referral!;
+  const [consult, setConsult] = useState("");
+  const [moving, setMoving] = useState(false);
+  const [facility, setFacility] = useState("");
+  const me = getUser();
+  const canRespond = me && (me.role === "clinician" || me.role === "admin");
+  const options = (meta?.facilities ?? []).filter((f) => f.services.includes(ref.service) && f.id !== ref.facility_id);
+
+  return (
+    <Card className="p-5 text-sm">
+      <div className="flex items-center justify-between">
+        <h2 className="font-semibold text-slate-900">Referral</h2>
+        <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${REFERRAL_STYLE[ref.status] ?? ""}`}>{ref.status.replace("_", " ")}</span>
+      </div>
+      <p className="mt-2 font-medium text-slate-800">{ref.service_label}</p>
+      <p className="text-slate-700">{ref.facility_name ?? "No facility offers this service"}</p>
+      <p className="text-xs text-slate-500">
+        {REGION_LABEL[ref.facility_region ?? ""] ?? ""}
+        {ref.facility_region && ref.facility_region !== ref.patient_region ? ` (patient lives in ${REGION_LABEL[ref.patient_region]})` : ""}
+        {ref.insurance ? ` · ${ref.insurance} ${ref.network_ok ? "✓ in network" : "⚠ out of network"}` : ""}
+      </p>
+      <p className="mt-1 text-xs text-slate-500">Sent {when(ref.sent_at)}</p>
+      {ref.responded_at && (
+        <p className="mt-1 text-xs text-slate-600">
+          {ref.status === "accepted" ? "Accepted" : "Declined"} by {ref.responder} {when(ref.responded_at)}
+          {ref.response_note ? `: ${ref.response_note}` : ""}
+        </p>
+      )}
+      {ref.previous.length > 0 && (
+        <p className="mt-1 text-xs text-slate-500">Previously: {ref.previous.map((p) => `${p.facility_name} (${p.status})`).join(", ")}</p>
+      )}
+
+      {!closed && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {ref.status === "sent" && canRespond && (
+            <>
+              <Button variant="primary" disabled={busy} onClick={() => act(() => post(`/api/cases/${caseId}/referral/respond`, { accept: true }))}>
+                Accept
+              </Button>
+              <Button
+                disabled={busy}
+                onClick={() => {
+                  const n = window.prompt("Reason for declining (shared with the referring team)");
+                  if (n) act(() => post(`/api/cases/${caseId}/referral/respond`, { accept: false, note: n }));
+                }}
+              >
+                Decline
+              </Button>
+            </>
+          )}
+          <Button variant="ghost" disabled={busy} onClick={() => setMoving(!moving)}>
+            Re-refer…
+          </Button>
+        </div>
+      )}
+      {moving && (
+        <div className="mt-2 flex gap-2">
+          <select className={inputCls} value={facility} onChange={(e) => setFacility(e.target.value)}>
+            <option value="">Next suitable facility (auto)</option>
+            {options.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name} · {f.region_label}
+                {ref.insurance && !f.networks.includes(ref.insurance) ? " (out of network)" : ""}
+              </option>
+            ))}
+          </select>
+          <Button
+            variant="primary"
+            disabled={busy}
+            onClick={() =>
+              act(async () => {
+                await post(`/api/cases/${caseId}/referral/resend`, { facility_id: facility || null });
+                setMoving(false);
+                setFacility("");
+              })
+            }
+          >
+            Send
+          </Button>
+        </div>
+      )}
+
+      <div className="mt-4 border-t border-slate-100 pt-3">
+        <h3 className="mb-2 text-xs font-semibold uppercase text-slate-500">Clinician consult</h3>
+        {ref.consult.length === 0 && <p className="text-xs text-slate-400">No consult notes yet.</p>}
+        <ul className="space-y-2">
+          {ref.consult.map((n, i) => (
+            <li key={i} className="rounded-lg bg-indigo-50 p-2.5 text-indigo-950">
+              <div className="text-[11px] text-indigo-700">
+                {n.by} ({n.role}) · {when(n.at)}
+              </div>
+              {n.text}
+            </li>
+          ))}
+        </ul>
+        {!closed && (
+          <form
+            className="mt-2 flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (consult.trim())
+                act(async () => {
+                  await post(`/api/cases/${caseId}/referral/consult`, { text: consult });
+                  setConsult("");
+                });
+            }}
+          >
+            <input className={inputCls} value={consult} onChange={(e) => setConsult(e.target.value)} placeholder="Note to the receiving clinician" />
+            <Button disabled={busy || !consult.trim()}>Send</Button>
+          </form>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -176,17 +329,28 @@ function CaseView() {
     ...d.events.filter((e) => !QUIET_EVENTS.has(e.type)).map((e) => ({ kind: "event" as const, at: e.created_at, ev: e })),
   ].sort((a, b) => a.at.localeCompare(b.at));
 
-  const progress = d.allowed_transitions.filter((s) => !s.startsWith("closed_") && s !== "escalated");
+  const progress = d.allowed_transitions.filter((s) => !s.startsWith("closed_") && s !== "escalated" && !(c.status === "booked" && s === "in_care"));
   const closes = d.allowed_transitions.filter((s) => s.startsWith("closed_"));
 
   return (
     <Shell>
       <div className="mb-4 flex items-center gap-2 text-sm text-slate-500">
-        <Link href="/" className="hover:text-teal-700">
+        <Link href="/board" className="hover:text-teal-700">
           Case board
         </Link>
         <span>/</span>
         <span className="text-slate-700">{c.id}</span>
+        {c.patient_link && (
+          <a
+            href={`/p?t=${new URL(c.patient_link).searchParams.get("t")}`}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-auto rounded-lg px-2.5 py-1 font-medium text-teal-800 ring-1 ring-inset ring-teal-200 hover:bg-teal-50"
+            title="Opens exactly what the patient sees (actions there count as the patient's)"
+          >
+            Open patient page ↗
+          </a>
+        )}
       </div>
 
       {/* Header */}
@@ -198,11 +362,18 @@ function CaseView() {
               <UrgencyPill urgency={c.urgency} />
               <StatusPill status={c.status} />
               {c.overdue && !closed && <OverduePill />}
+              {!closed && <RiskPill risk={c.loss_risk} />}
               {c.ai_paused && !closed && <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-200">Staff handling chat</span>}
             </div>
             <p className="mt-1 text-sm text-slate-500">
-              {c.phone} · {c.language === "ar" ? "Arabic" : "English"} · {SCREENING_LABEL[c.screening_type]} · {c.source}
+              {c.phone} · {c.language === "ar" ? "Arabic" : "English"} · {SCREENING_LABEL[c.screening_type] ?? c.screening_type} · {c.source}
               {c.location ? ` · ${c.location}` : ""}
+            </p>
+            <p className="mt-0.5 text-sm text-slate-500">
+              {c.emirates_id ? `Emirates ID ${c.emirates_id} · ` : ""}
+              {REGION_LABEL[c.region ?? ""] ?? "Abu Dhabi"}
+              {c.insurance ? ` · ${c.insurance}` : ""}
+              {c.pathway ? ` · ${PATHWAY_LABEL[c.pathway] ?? c.pathway} pathway` : ""}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-2 text-sm">
@@ -226,6 +397,22 @@ function CaseView() {
         {/* Actions */}
         {!closed ? (
           <div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+            {c.status === "booked" && (
+              <>
+                <Button variant="primary" disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/attendance`, { attended: true }))}>
+                  ✓ Attended
+                </Button>
+                <Button
+                  disabled={busy}
+                  onClick={() => {
+                    const n = window.prompt("No-show: any note? (the patient gets a re-booking message)", "");
+                    if (n !== null) act(() => post(`/api/cases/${id}/attendance`, { attended: false, note: n }));
+                  }}
+                >
+                  ✗ Did not attend
+                </Button>
+              </>
+            )}
             {progress.map((s) => (
               <Button key={s} variant="primary" disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/status`, { status: s }))}>
                 {ACTION_LABEL[s] ?? s}
@@ -237,15 +424,40 @@ function CaseView() {
               </Button>
             ))}
             <span className="mx-1 w-px bg-slate-200" />
-            <Button disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/contact`))}>
-              Message again
+            <Button
+              variant="primary"
+              disabled={busy}
+              title="Sends the WhatsApp message with the patient page link and a 'Talk to us' call button; the patient calls when ready"
+              onClick={() => act(() => post(`/api/cases/${id}/outreach?channel=invite`))}
+            >
+              📲 Notify patient
+            </Button>
+            <Button
+              disabled={busy || !meta?.channels.whatsapp_call}
+              title="Sends the message, then the AI rings them on WhatsApp (blocked by Meta for some countries, e.g. +234)"
+              onClick={() =>
+                act(async () => {
+                  const r = await post<{ call_error: string | null }>(`/api/cases/${id}/outreach?channel=whatsapp`);
+                  if (r.call_error) setError(`Message sent. WhatsApp call: ${r.call_error}`);
+                })
+              }
+            >
+              AI calls on WhatsApp
             </Button>
             <Button
               disabled={busy || !meta?.channels.phone_call}
-              title={meta?.channels.phone_call ? "AI agent rings the patient's phone (Bimpe)" : "Phone calls need BIMPEAI_AGENT_ID"}
-              onClick={() => act(() => post(`/api/cases/${id}/call?channel=phone`))}
+              title={meta?.channels.phone_call ? "Sends the WhatsApp message, then the AI rings the phone number (Bimpe)" : "Phone calls need BIMPEAI_AGENT_ID"}
+              onClick={() =>
+                act(async () => {
+                  const r = await post<{ call_error: string | null }>(`/api/cases/${id}/outreach?channel=phone`);
+                  if (r.call_error) setError(`Message sent. Phone call: ${r.call_error}`);
+                })
+              }
             >
-              📞 Call phone
+              AI calls phone
+            </Button>
+            <Button disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/contact`))}>
+              Message only
             </Button>
             {c.status !== "escalated" && (
               <Button
@@ -362,6 +574,42 @@ function CaseView() {
 
         {/* Side panel */}
         <div className="space-y-4">
+          {(c.risk_findings?.length ?? 0) > 0 && (
+            <Card className="p-5 text-sm">
+              <h2 className="mb-2 font-semibold text-slate-900">Why this person was prioritised</h2>
+              <ul className="space-y-1.5">
+                {c.risk_findings!.map((f) => (
+                  <li key={f.pathway} className="flex gap-2">
+                    <span className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${f.urgency === "urgent" ? "bg-red-600" : f.urgency === "soon" ? "bg-amber-500" : "bg-slate-400"}`} />
+                    <span>
+                      <b>{PATHWAY_LABEL[f.pathway] ?? f.pathway}</b> · {f.reason}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {c.readings && Object.keys(c.readings).length > 0 && (
+                <p className="mt-2 text-xs text-slate-500">
+                  Readings: {Object.entries(c.readings).map(([k, v]) => `${meta?.readings[k]?.split(" (")[0] ?? k} ${v}`).join(" · ")}
+                </p>
+              )}
+            </Card>
+          )}
+
+          {c.loss_risk && c.loss_risk.reasons.length > 0 && !closed && (
+            <Card className={`p-5 text-sm ${c.loss_risk.level === "high" ? "border-rose-300 bg-rose-50" : ""}`}>
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold text-slate-900">Lost-to-follow-up risk</h2>
+                <RiskPill risk={c.loss_risk} />
+              </div>
+              <ul className="mt-2 list-disc pl-5 text-slate-700">
+                {c.loss_risk.reasons.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {c.referral && <ReferralCard caseId={id} c={d.case} meta={meta} busy={busy} act={act} closed={closed} />}
           <Card className="p-5 text-sm">
             <h2 className="mb-3 font-semibold text-slate-900">Case</h2>
             <dl className="grid grid-cols-[110px_1fr] gap-y-2">
@@ -375,6 +623,14 @@ function CaseView() {
               <dd>{c.identity_confirmed ? "Confirmed" : "Not yet"}</dd>
               <dt className="text-slate-500">Attempts</dt>
               <dd>{c.attempts}</dd>
+              <dt className="text-slate-500">Attended</dt>
+              <dd>{c.attended_at ? when(c.attended_at) : "—"}</dd>
+              {(c.no_show_count ?? 0) > 0 && (
+                <>
+                  <dt className="text-slate-500">No-shows</dt>
+                  <dd className="font-medium text-red-600">{c.no_show_count}</dd>
+                </>
+              )}
               {!closed && (
                 <>
                   <dt className="text-slate-500">SLA due</dt>

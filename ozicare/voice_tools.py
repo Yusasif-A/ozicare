@@ -113,23 +113,46 @@ async def confirm_identity(call: dict, confirmed: bool) -> str:
 
 
 async def explain_result(call: dict) -> str:
+    """
+    Everything the patient needs to know after screening, in one tool result:
+    what was found, why follow-up matters, where they are referred, what is
+    already booked, what to bring and the warning signs. The model explains it
+    in its own words but may not add medical facts.
+    """
     case = await _case_for(call)
     gate = _gate(call, case)
     if gate:
         return gate
+    from .referrals import SERVICES, clinic_for
+
     lang = case["language"]
     s = content.screening(case["screening_type"], lang)
+    ref = case.get("referral") or {}
+    svc = SERVICES.get(ref.get("service", ""), ("a follow-up review",))[0]
+    clinic = clinic_for(case, lang)
+    appt = case.get("appointment")
     await _record(call, "explained")
     await cases.log_event(case["_id"], "ai", "explained", {"channel": "voice"})
-    return (
-        "Explain this in your own warm, plain words, one or two sentences at a time, and check they follow. "
-        "Do not add any medical facts beyond it.\n"
-        f"EXPLANATION: {s['explain']}\n"
-        + (f"CASE NOTE: {case['result_summary']}\n" if case.get("result_summary") else "")
-        + "NEXT STEPS: " + " ".join(s["next_steps"]) + "\n"
-        f"WARNING SIGNS (mention once): if they have {s['warning']}, go to emergency care now.\n"
-        "Then offer to book the follow-up appointment."
-    )
+    parts = [
+        "Explain this in your own warm, plain words, one or two sentences at a time, and check they follow. Do not add any medical facts beyond it. Never read numbers or lab values.",
+        f"WHAT THE SCREENING FOUND: {s['explain']}",
+    ]
+    if case.get("result_summary"):
+        parts.append(f"NOTE FROM THE CARE TEAM: {case['result_summary']}")
+    if case["urgency"] == "urgent":
+        parts.append("URGENCY: this follow-up is important and should happen in the next day or two. Say so calmly, without alarming them.")
+    parts.append(f"REFERRAL: the care team has referred them to {svc} at {clinic['name']}, {clinic['address']}.")
+    if ref.get("status") == "accepted":
+        parts.append("The clinic has accepted the referral and is expecting them.")
+    parts.append("WHY IT MATTERS: the visit is usually short, and it is how a clinician checks the result properly and helps early if anything is needed.")
+    parts.append("NEXT STEPS: " + " ".join(s["next_steps"]))
+    if appt:
+        parts.append(f"ALREADY BOOKED: {appt['label']} at {appt['clinic']}. Remind them of it, do not book again, and ask if that time still works.")
+    else:
+        parts.append("THEN: offer to book the appointment now. If they agree, call get_available_slots.")
+    parts.append(f"WHAT TO BRING: {s['bring']}")
+    parts.append(f"WARNING SIGNS, mention once near the end: if they have {s['warning']}, go to emergency care straight away.")
+    return "\n".join(parts)
 
 
 async def get_available_slots(call: dict) -> str:
@@ -139,7 +162,9 @@ async def get_available_slots(call: dict) -> str:
         return gate
     slots = cases.next_slots(case["language"])
     await cases.update_case(case["_id"], {"offered_slots": slots})
-    clinic = content.CLINIC[case["language"]]["name"]
+    from .referrals import clinic_for
+
+    clinic = clinic_for(case, case["language"])["name"]
     listing = "; ".join(f"option {i}: {s['label']}" for i, s in enumerate(slots, 1))
     return f"Offer these follow-up slots at {clinic}: {listing}. When they choose, call book_slot with the option number (1, 2 or 3)."
 
@@ -160,13 +185,13 @@ async def book_slot(call: dict, option: int) -> str:
     # and swallows delivery failures, so only claim it was sent if it was.
     from . import conversation
 
-    pid = await conversation.say(
-        case,
-        content.t("booked", case["language"], slot=appt["label"], clinic=appt["clinic"], address=appt["address"], bring=s["bring"]),
-        meta={"kind": "booked", "from_call": call["_id"]},
+    pid = await conversation.say(case, conversation.booked_text(case), meta={"kind": "booked", "from_call": call["_id"]})
+    sent = " A confirmation with a link to their OziCare page has been sent to their WhatsApp." if pid else ""
+    return (
+        f"Booked: {appt['label']} at {appt['clinic']}, {appt['address']}. Tell them the day, time and place, "
+        f"and that they should bring: {s['bring']}.{sent} Say they will get a reminder the day before. "
+        "Then ask if they have any questions."
     )
-    sent = " A confirmation has been sent to their WhatsApp." if pid else ""
-    return f"Booked: {appt['label']} at {appt['clinic']}. Tell them, and that they should bring: {s['bring']}.{sent}"
 
 
 async def request_human(call: dict, reason: str) -> str:

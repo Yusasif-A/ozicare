@@ -33,8 +33,37 @@ export const URGENCY_STYLE: Record<string, string> = {
 export const SCREENING_LABEL: Record<string, string> = {
   blood_pressure: "Blood pressure",
   diabetes: "Blood sugar / diabetes",
+  obesity: "Weight / BMI",
   cervical: "Cervical",
+  colorectal: "Bowel (FIT)",
+  breast: "Breast (mammogram)",
   general_abnormal: "General abnormal",
+};
+
+export const PATHWAY_LABEL: Record<string, string> = {
+  hypertension: "Hypertension",
+  diabetes: "Diabetes",
+  obesity: "Obesity",
+  cervical: "Cervical cancer",
+  colorectal: "Colorectal cancer",
+  breast: "Breast cancer",
+  general: "General review",
+};
+
+export const REGION_LABEL: Record<string, string> = { abu_dhabi: "Abu Dhabi", al_ain: "Al Ain", al_dhafra: "Al Dhafra" };
+
+export const RISK_STYLE: Record<string, string> = {
+  high: "bg-rose-600 text-white ring-rose-600",
+  medium: "bg-amber-50 text-amber-800 ring-amber-300",
+  low: "bg-slate-50 text-slate-500 ring-slate-200",
+  none: "bg-slate-50 text-slate-400 ring-slate-200",
+};
+
+export const REFERRAL_STYLE: Record<string, string> = {
+  sent: "bg-sky-50 text-sky-700 ring-sky-200",
+  accepted: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  declined: "bg-red-50 text-red-700 ring-red-200",
+  no_facility: "bg-red-50 text-red-700 ring-red-200",
 };
 
 export const ACTION_LABEL: Record<string, string> = {

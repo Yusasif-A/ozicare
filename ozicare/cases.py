@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
 from datetime import datetime, timedelta
 
 from pymongo import ReturnDocument
@@ -72,12 +73,13 @@ def first_name(display_name: str) -> str:
     return (display_name or "").split()[0] if display_name else ""
 
 
-async def upsert_patient(phone: str, display_name: str, language: str) -> dict:
+async def upsert_patient(phone: str, display_name: str, language: str, *, emirates_id: str = "", insurance: str = "", region: str = "") -> dict:
     ts = now()
+    extra = {k: v for k, v in {"emirates_id": emirates_id, "insurance": insurance, "region": region}.items() if v}
     return await db().patients.find_one_and_update(
         {"phone_e164": phone},
         {
-            "$set": {"display_name": display_name, "preferred_language": language, "updated_at": ts},
+            "$set": {"display_name": display_name, "preferred_language": language, "updated_at": ts, **extra},
             "$setOnInsert": {"_id": new_id("PT"), "phone_e164": phone, "consent_at": None, "created_at": ts},
         },
         upsert=True,
@@ -182,25 +184,45 @@ async def create_case(
     phone: str,
     display_name: str,
     language: str,
-    screening_type: str,
-    urgency: str,
+    screening_type: str = "",
+    urgency: str = "",
     result_summary: str = "",
     source: str = "demo",
     location: str = "",
     external_ref: str = "",
+    emirates_id: str = "",
+    region: str = "",
+    insurance: str = "",
+    readings: dict | None = None,
     actor: str = "staff",
     actor_id: str | None = None,
 ) -> dict:
-    phone = normalize_phone(phone)
-    if urgency not in URGENCIES:
-        raise ValueError(f"urgency must be one of {URGENCIES}")
+    """
+    With readings, the agreed criteria (risk.assess) decide the pathway and
+    urgency; a staff-chosen urgency can only raise it, never lower it, so a
+    rule-flagged urgent result cannot be quietly downgraded at intake.
+    """
+    from . import referrals, risk
     from .content import SCREENING_TYPES
 
+    phone = normalize_phone(phone)
+    assessment = risk.assess(readings) if readings else None
+    if assessment and assessment["actionable"]:
+        screening_type = screening_type or assessment["screening_type"]
+        if not urgency or risk.URGENCY_RANK.get(urgency, -1) < risk.URGENCY_RANK[assessment["urgency"]]:
+            urgency = assessment["urgency"]
+    if assessment and not assessment["actionable"] and not (screening_type and urgency):
+        raise ValueError("readings are within the agreed criteria: no actionable finding, so no case is opened")
+    urgency = urgency or "routine"
+    if urgency not in URGENCIES:
+        raise ValueError(f"urgency must be one of {URGENCIES}")
     if screening_type not in SCREENING_TYPES:
         raise ValueError(f"screening_type must be one of {SCREENING_TYPES}")
+    if region and region not in referrals.REGIONS:
+        raise ValueError(f"region must be one of {tuple(referrals.REGIONS)}")
     language = language if language in ("en", "ar") else "en"
 
-    patient = await upsert_patient(phone, display_name.strip(), language)
+    patient = await upsert_patient(phone, display_name.strip(), language, emirates_id=emirates_id.strip(), insurance=insurance, region=region)
     owner = await pick_owner(urgency)
     ts = now()
     case = {
@@ -208,11 +230,17 @@ async def create_case(
         "patient_id": patient["_id"],
         "phone": phone,
         "patient_name": display_name.strip(),
+        "emirates_id": emirates_id.strip(),
+        "region": region or "abu_dhabi",
+        "insurance": insurance,
         "language": language,
         "source": source,
         "location": location,
         "external_ref": external_ref,
         "screening_type": screening_type,
+        "pathway": assessment["pathway"] if assessment and assessment["actionable"] else referrals.SCREENING_PATHWAY.get(screening_type, "general"),
+        "readings": readings or {},
+        "risk_findings": assessment["findings"] if assessment else [],
         "result_summary": result_summary.strip(),
         "urgency": urgency,
         "status": "new",
@@ -229,13 +257,18 @@ async def create_case(
         "appointment": None,
         "offered_slots": [],
         "escalation": None,
+        "referral": None,
+        "no_show_count": 0,
         "first_contact_at": None,
         "acknowledged_at": None,
         "booked_at": None,
+        "attended_at": None,
         "closed_reason": None,
         "closed_at": None,
         "created_at": ts,
         "updated_at": ts,
+        # Secret for the patient's own page (patient_app.py).
+        "patient_token": secrets.token_urlsafe(18),
     }
     await db().cases.insert_one(case)
     await log_event(
@@ -245,6 +278,9 @@ async def create_case(
         {"source": source, "urgency": urgency, "screening_type": screening_type, "owner": case["owner_name"]},
         actor_id,
     )
+    if case["risk_findings"]:
+        await log_event(case["_id"], "system", "risk_assessed", {"pathway": case["pathway"], "urgency": urgency, "findings": case["risk_findings"]})
+    case["referral"] = await referrals.auto_refer(case)
     logger.info("Case %s created (%s, %s) owner=%s", case["_id"], screening_type, urgency, case["owner_name"])
     return case
 
@@ -348,10 +384,11 @@ async def acknowledge(case: dict, actor: str = "patient", channel: str = "whatsa
 
 
 async def book(case: dict, slot: dict, actor: str = "patient", channel: str = "whatsapp") -> dict:
-    from .content import CLINIC
+    from .referrals import clinic_for
 
     lang = case.get("language", "en")
-    appt = {"slot_iso": slot["iso"], "label": slot["label"], "clinic": CLINIC[lang]["name"], "address": CLINIC[lang]["address"], "channel": channel}
+    clinic = clinic_for(case, lang)
+    appt = {"slot_iso": slot["iso"], "label": slot["label"], "clinic": clinic["name"], "address": clinic["address"], "channel": channel}
     if case["status"] in ("new", "contacted", "escalated"):
         case = await transition(case["_id"], "acknowledged", actor=actor, note=f"booked on {channel}")
     # Day-before reminder; for a slot booked less than a day ahead, a
@@ -379,6 +416,43 @@ async def book(case: dict, slot: dict, actor: str = "patient", channel: str = "w
     return case
 
 
+async def record_attendance(case: dict, attended: bool, *, actor: str = "staff", actor_id: str | None = None, note: str = "") -> dict:
+    """
+    The visit happened (booked -> in_care, time to assessment recorded) or it
+    did not (no-show: back to acknowledged so the loop re-books instead of
+    the person silently dropping out).
+    """
+    if case["status"] != "booked":
+        raise TransitionError("attendance can only be recorded for a booked case")
+    appt = case.get("appointment") or {}
+    if attended:
+        ts = now()
+        case = await transition(
+            case["_id"], "in_care", actor=actor, actor_id=actor_id, note=note or "attended appointment",
+            extra={"attended_at": ts, "next_action_at": None, "next_action": "complete_care", "sla_due_at": ts + timedelta(days=30)},
+        )
+        await log_event(case["_id"], actor, "attended", {"appointment": appt.get("label"), "clinic": appt.get("clinic")}, actor_id)
+        return case
+    no_shows = (case.get("no_show_count") or 0) + 1
+    case = await transition(
+        case["_id"], "acknowledged", actor=actor, actor_id=actor_id, note=note or "did not attend",
+        extra={
+            "no_show_count": no_shows,
+            "missed_appointments": [*(case.get("missed_appointments") or []), appt],
+            "appointment": None,
+            # Reach out now with the re-booking message, then the usual nudges.
+            "next_action_at": now(),
+            "next_action": "missed_appointment",
+            "attempts": 0,
+            "sla_due_at": now() + ack_window(case["urgency"]),
+        },
+    )
+    await log_event(case["_id"], actor, "no_show", {"appointment": appt.get("label"), "count": no_shows}, actor_id)
+    if no_shows >= 2 or case["urgency"] == "urgent":
+        case = await escalate(case, f"Missed {no_shows} appointment{'s' if no_shows > 1 else ''}: needs a personal call", actor="system")
+    return case
+
+
 async def escalate(case: dict, reason: str, *, actor: str = "system", actor_id: str | None = None, summary: str = "") -> dict:
     """
     Hand the case to a human. Urgent escalations go to a clinician even if a
@@ -402,8 +476,6 @@ def next_slots(lang: str, n: int = 3) -> list[dict]:
     Simulated clinic availability: the next n weekday slots from tomorrow.
     A pilot swaps this for the clinic's booking system.
     """
-    days_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    days_ar = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
     # One slot per weekday, rotating the time, reads like real availability.
     times = [(9, 30), (11, 0), (14, 0)]
     out: list[dict] = []
@@ -412,24 +484,41 @@ def next_slots(lang: str, n: int = 3) -> list[dict]:
         if day.weekday() < 5:
             h, m = times[len(out) % len(times)]
             slot = day.replace(hour=h, minute=m)
-            if lang == "ar":
-                label = f"{days_ar[slot.weekday()]} {slot.day}/{slot.month} الساعة {slot:%H:%M}"
-            else:
-                label = f"{days_en[slot.weekday()]} {slot.day} {slot:%b} {slot:%H:%M}"
-            out.append({"iso": slot.isoformat(), "label": label})
+            out.append({"iso": slot.isoformat(), "label": slot_label(slot, lang)})
         day += timedelta(days=1)
     return out
 
 
+def slot_label(slot: datetime, lang: str) -> str:
+    days_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    days_ar = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
+    if lang == "ar":
+        return f"{days_ar[slot.weekday()]} {slot.day}/{slot.month} الساعة {slot:%H:%M}"
+    return f"{days_en[slot.weekday()]} {slot.day} {slot:%b} {slot:%H:%M}"
+
+
+def _jsonable(v):
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_jsonable(x) for x in v]
+    return v
+
+
 def public(case: dict) -> dict:
-    """Case as JSON for the dashboard."""
-    out = {k: v for k, v in case.items() if k != "_id"}
+    """Case as JSON for the dashboard, with the live loss-to-follow-up risk."""
+    from .risk import loss_risk
+
+    out = {k: _jsonable(v) for k, v in case.items() if k not in ("_id", "patient_token")}
     out["id"] = case["_id"]
-    for k, v in list(out.items()):
-        if isinstance(v, datetime):
-            out[k] = v.isoformat()
-    if isinstance(out.get("escalation"), dict) and isinstance(out["escalation"].get("at"), datetime):
-        out["escalation"] = {**out["escalation"], "at": out["escalation"]["at"].isoformat()}
+    out["loss_risk"] = loss_risk(case)
+    # Staff can open exactly what the patient sees.
+    from .config import settings
+
+    if case.get("patient_token") and settings.app.patient_app_url:
+        out["patient_link"] = f"{settings.app.patient_app_url}/p?t={case['patient_token']}"
     return out
 
 

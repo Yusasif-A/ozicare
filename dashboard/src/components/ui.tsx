@@ -1,4 +1,17 @@
-import { STATUS_LABEL, STATUS_STYLE, URGENCY_STYLE } from "@/lib/format";
+import { RISK_STYLE, STATUS_LABEL, STATUS_STYLE, URGENCY_STYLE } from "@/lib/format";
+import type { LossRisk } from "@/lib/api";
+
+export function RiskPill({ risk }: { risk?: LossRisk }) {
+  if (!risk || risk.level === "none") return null;
+  return (
+    <span
+      title={risk.reasons.join(" · ") || "no warning signs"}
+      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${RISK_STYLE[risk.level]}`}
+    >
+      Loss risk {risk.score}
+    </span>
+  );
+}
 
 export function StatusPill({ status }: { status: string }) {
   return (

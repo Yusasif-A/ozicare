@@ -75,7 +75,9 @@ async def _act(case: dict, stats: dict) -> None:
         return
 
     if status == "acknowledged":
-        # Engaged but not booked: nudge, but never close someone who replied.
+        # Engaged but not booked (or just missed an appointment: attempts were
+        # reset and contact_patient sends the re-booking message): nudge, but
+        # never close someone who replied.
         if case.get("attempts", 0) < settings.sla.max_attempts:
             await conversation.contact_patient(case, reminder=True)
             stats["reminded"] += 1
@@ -85,7 +87,9 @@ async def _act(case: dict, stats: dict) -> None:
 
     if status == "booked" and case.get("next_action") == "appointment_reminder":
         await conversation.send_appointment_reminder(case)
-        # Nothing more is automatic: attendance is confirmed by staff.
+        # Attendance is confirmed by the facility (FHIR Encounter / dashboard).
+        # If nobody has by the end of the appointment day, the case goes
+        # overdue via sla_due_at and staff are prompted to confirm it.
         await cases.update_case(case["_id"], {"next_action_at": None, "next_action": "confirm_attendance"})
         stats["appt_reminders"] += 1
 

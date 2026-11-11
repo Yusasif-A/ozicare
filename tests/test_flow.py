@@ -111,7 +111,7 @@ def test_happy_path_english():
         assert (await cases.get_case(case["_id"]))["status"] == "acknowledged"
 
         out = await _inbound(phone, "2")
-        assert "1." in out and "Riverside" in out
+        assert "1." in out and "Primary Health Centre" in out  # the referral's facility
         out = await _inbound(phone, "", button_id="slot_1")
         c = await cases.get_case(case["_id"])
         assert c["status"] == "booked" and c["appointment"]["label"] in out
@@ -221,5 +221,184 @@ def test_voice_tools_gate_on_identity_then_book():
         # Bimpe never fills session_id: resolution must still find this call.
         resolved = await voice_tools.resolve_call("{{session_id}}")
         assert resolved["_id"] == call["_id"]
+
+    run(go())
+
+
+def test_risk_rules():
+    from ozicare import risk
+
+    a = risk.assess({"systolic": 185, "diastolic": 110})
+    assert a["urgency"] == "urgent" and a["pathway"] == "hypertension" and a["screening_type"] == "blood_pressure"
+    a = risk.assess({"systolic": 150, "diastolic": 92, "hba1c": 7.1})
+    assert a["urgency"] == "soon" and a["pathway"] == "diabetes" and len(a["findings"]) == 2
+    a = risk.assess({"birads": "4", "bmi": 33})
+    assert a["pathway"] == "breast" and a["urgency"] == "urgent"  # cancer pathway first
+    assert risk.assess({"cervical_cytology": "HSIL"})["urgency"] == "soon"
+    assert risk.assess({"fit": "positive"})["pathway"] == "colorectal"
+    assert not risk.assess({"systolic": 118, "diastolic": 76, "hba1c": 5.2, "bmi": 23})["actionable"]
+
+
+def test_readings_drive_urgency_and_referral():
+    async def go():
+        # Staff said routine; the rules say urgent. Rules win upward.
+        case = await cases.create_case(
+            phone="+971500000010", display_name="Mariam Al Mansoori", language="ar", urgency="routine",
+            readings={"systolic": 190, "diastolic": 118}, region="al_ain", insurance="Thiqa",
+        )
+        assert case["urgency"] == "urgent" and case["screening_type"] == "blood_pressure"
+        assert case["owner_name"] == "Dr. Yusuf Clinician"
+        ref = case["referral"]
+        assert ref["service"] == "urgent_bp" and ref["facility_region"] == "al_ain" and ref["network_ok"]
+        # A private plan in Al Dhafra for a mammogram: in-network facility is in another region.
+        c2 = await cases.create_case(phone="+971500000011", display_name="Sara K", language="en", readings={"birads": 4}, region="al_dhafra", insurance="Private")
+        assert c2["referral"]["service"] == "breast_diagnostic" and c2["referral"]["network_ok"]
+        with pytest.raises(ValueError):
+            await cases.create_case(phone="+971500000012", display_name="Well Person", language="en", readings={"systolic": 115, "diastolic": 70})
+
+    run(go())
+
+
+def test_referral_decline_and_re_refer():
+    async def go():
+        from ozicare import referrals
+
+        case = await cases.create_case(phone="+971500000013", display_name="Omar H", language="en", readings={"hba1c": 8.0}, region="abu_dhabi", insurance="Daman Basic")
+        clin = await db().staff_users.find_one({"role": "clinician"})
+        with pytest.raises(ValueError):
+            await referrals.respond(case, False, staff=clin)  # reason required
+        case = await referrals.respond(case, False, staff=clin, note="No endocrinology capacity this month")
+        assert case["referral"]["status"] == "declined"
+        first = case["referral"]["facility_id"]
+        case = await referrals.re_refer(case, staff=clin)
+        assert case["referral"]["status"] == "sent" and case["referral"]["facility_id"] != first
+        assert case["referral"]["previous"][0]["status"] == "declined"
+        case = await referrals.consult(case, staff=clin, text="Please prioritise, HbA1c 8.0")
+        assert case["referral"]["consult"][0]["text"].startswith("Please")
+
+    run(go())
+
+
+def test_no_show_rebooks_then_attended_closes_loop():
+    async def go():
+        phone = "+971500000014"
+        case = await cases.create_case(phone=phone, display_name="Khalid R", language="en", readings={"bmi": 34})
+        await conversation.contact_patient(case)
+        await _inbound(phone, "2")
+        await _inbound(phone, "yes")
+        out = await _inbound(phone, "1")
+        case = await cases.get_case(case["_id"])
+        assert case["status"] == "booked" and "/p?t=" in out
+        case = await cases.record_attendance(case, False)
+        assert case["status"] == "acknowledged" and case["no_show_count"] == 1
+        assert cases.public(case)["loss_risk"]["score"] >= 25
+        stats = await scheduler.tick()
+        assert stats["reminded"] == 1 and "could not make your follow-up" in _texts()[-1]
+        await _inbound(phone, "2")
+        await _inbound(phone, "2")
+        case = await cases.get_case(case["_id"])
+        assert case["status"] == "booked"
+        case = await cases.record_attendance(case, True)
+        assert case["status"] == "in_care" and case["attended_at"]
+
+    run(go())
+
+
+def test_patient_page_gated_then_books():
+    async def go():
+        from fastapi import HTTPException
+
+        from ozicare import patient_app
+
+        phone = "+971500000016"
+        case = await cases.create_case(phone=phone, display_name="Noura S", language="ar", readings={"hba1c": 7.0})
+        await conversation.contact_patient(case)
+        assert "/p?t=" in _texts()[-1]
+        token = case["patient_token"]
+        v = await patient_app.view(token)
+        assert not v["identity_confirmed"] and "explain" not in v and "referral" not in v  # nothing before identity
+        with pytest.raises(HTTPException):
+            await patient_app.book(token, patient_app.Book(slot_iso=cases.next_slots("ar")[0]["iso"]))
+        v = await patient_app.confirm(token, patient_app.Confirm(is_me=True))
+        assert v["identity_confirmed"] and v["referral"]["clinic"] and v["slots"]
+        assert (await patient_app.view(token, "en"))["screening"].startswith("blood sugar")
+        v = await patient_app.book(token, patient_app.Book(slot_iso=v["slots"][0]["iso"]))
+        assert v["appointment"] and v["step"] == "booked"
+        assert (await cases.get_case(case["_id"]))["status"] == "booked"
+        with pytest.raises(HTTPException):
+            await patient_app.view("x" * 24)
+        assert "patient_token" not in cases.public(case) and "/p?t=" in cases.public(case)["patient_link"]
+
+    run(go())
+
+
+def test_whatsapp_call_follows_post_screening_flow():
+    """The LiveKit (WhatsApp call) agent runs the same steps as the phone call."""
+
+    async def go():
+        from ozicare import bimpe, voice_agent
+
+        case = await cases.create_case(phone="+971500000017", display_name="Layla H", language="en", readings={"systolic": 168, "diastolic": 102}, region="al_ain", insurance="Thiqa")
+        # Same script on both channels.
+        for prompt in (voice_agent.INSTRUCTIONS, bimpe.SYSTEM_PROMPT):
+            for step in ("confirm_identity", "explain_result", "get_available_slots", "book_slot", "what to bring", "end_call"):
+                assert step in prompt
+        call = await voice_tools.open_call(case, provider="livekit", direction="inbound", keys=["wa-call-1"])
+        assert "Identity not confirmed" in await voice_tools.explain_result(call)
+        await voice_tools.confirm_identity(call, True)
+        call = await db().calls.find_one({"_id": call["_id"]})
+        script = await voice_tools.explain_result(call)
+        for part in ("WHAT THE SCREENING FOUND", "REFERRAL", "Al Ain Family Health Centre", "WHY IT MATTERS", "WHAT TO BRING", "WARNING SIGNS", "offer to book"):
+            assert part in script
+        await voice_tools.get_available_slots(call)
+        out = await voice_tools.book_slot(call, 1)
+        assert "reminder the day before" in out and "OziCare page" in out
+        # Once booked, a second call reminds instead of re-booking.
+        call2 = await voice_tools.open_call(await cases.get_case(case["_id"]), provider="livekit", direction="inbound", keys=["wa-call-2"])
+        await voice_tools.confirm_identity(call2, True)
+        assert "ALREADY BOOKED" in await voice_tools.explain_result(await db().calls.find_one({"_id": call2["_id"]}))
+
+    run(go())
+
+
+def test_demo_reset_fills_board_and_outreach_messages():
+    async def go():
+        from ozicare import demo
+
+        res = await demo.reset(phone="+971500000099", name="Mariam Al Mansoori", lang="en")
+        assert res["samples"] == len(demo.SAMPLES) and res["live_case"]
+        statuses = {c["status"] async for c in db().cases.find({})}
+        assert {"escalated", "booked", "in_care", "closed_completed", "closed_lost", "new"} <= statuses
+        live = await cases.get_case(res["live_case"])
+        assert live["status"] == "new" and live["referral"]["facility_name"] and live["next_action_at"] is None
+        assert (await scheduler.tick())["contacted"] == 0  # waits for the presenter's click
+        n = len(SENT)
+        out = await demo.outreach(live, channel="invite", actor_id=None)
+        assert out["message"] and out["call"] is None
+        assert any(p["type"] == "interactive" and p["interactive"]["type"] == "voice_call" for p in SENT[n:])
+        live = await cases.get_case(live["_id"])
+        assert live["status"] == "contacted" and live["referral"]["status"] == "accepted"
+
+    run(go())
+
+
+def test_fhir_bundle_in_and_encounter_closes():
+    async def go():
+        from ozicare import fhir
+
+        res = await fhir.ingest_bundle(fhir.example_bundle(phone="+971500000015"))
+        assert res["actionable"] and res["pathway"] == "hypertension" and res["urgency"] == "soon"
+        case = await cases.get_case(res["case_id"])
+        assert case["language"] == "ar" and case["region"] == "al_ain" and case["insurance"] == "Thiqa"
+        assert case["emirates_id"].startswith("784")
+        assert {f["pathway"] for f in case["risk_findings"]} == {"hypertension", "diabetes"}
+        sr = fhir.service_request(case)
+        assert sr["resourceType"] == "ServiceRequest" and sr["subject"]["identifier"]["value"] == case["emirates_id"]
+        slot = cases.next_slots("ar")[0]
+        case = await cases.book(case, slot)
+        assert fhir.appointment(case)["status"] == "booked"
+        out = await fhir.apply_encounter({"resourceType": "Encounter", "status": "finished", "basedOn": [{"reference": f"ServiceRequest/{case['_id']}"}]})
+        assert out["status"] == "in_care"
+        assert fhir.task(await cases.get_case(case["_id"]))["status"] == "in-progress"
 
     run(go())

@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { clearSession, getToken, getUser, type User } from "@/lib/api";
 
 const NAV = [
-  { href: "/", label: "Case board" },
+  { href: "/board", label: "Case board" },
   { href: "/cases/new", label: "New case" },
   { href: "/metrics", label: "Metrics" },
 ];
@@ -30,13 +30,13 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3">
-          <Link href="/" className="flex items-center gap-2">
+          <Link href="/board" className="flex items-center gap-2">
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-teal-700 text-sm font-bold text-white">OC</span>
             <span className="font-semibold text-slate-900">OziCare</span>
           </Link>
           <nav className="flex gap-1">
             {NAV.map((n) => {
-              const active = n.href === "/" ? path === "/" || path === "/case" || path === "/case/" : path.startsWith(n.href);
+              const active = n.href === "/board" ? path.startsWith("/board") || path === "/case" || path === "/case/" : path.startsWith(n.href);
               return (
                 <Link
                   key={n.href}
