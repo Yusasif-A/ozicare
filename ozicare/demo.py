@@ -36,6 +36,34 @@ SAMPLES = [
     ("Rahul Mehta", "en", "al_ain", "Daman Basic", {"systolic": 186, "diastolic": 112}, "booked", {"appt_days": 1, "referral_status": "accepted"}, 8),
 ]
 
+# The live case Reset demo creates for the presenter's phone. Both are results
+# that come back from a lab days later, after the person has gone home.
+SCENARIOS = {
+    # Cervical sample read by the lab one to two weeks after screening.
+    "cervical": {
+        "name": "Mariam Al Mansoori",
+        "language": "en",
+        "readings": {"cervical_cytology": "HSIL, HPV 16 positive"},
+        "location": "Al Ain women's health screening unit",
+        "summary": {
+            "en": "The laboratory has now read the sample taken at your screening visit about two weeks ago.",
+            "ar": "انتهى المختبر الآن من قراءة العينة التي أُخذت في زيارة الفحص قبل نحو أسبوعين.",
+        },
+    },
+    # HbA1c blood test sent to the lab from a community screening. 7.4% is
+    # "soon"; keep it under 10 or the case turns urgent and escalates itself.
+    "diabetes": {
+        "name": "Mariam Al Mansoori",
+        "language": "ar",
+        "readings": {"hba1c": 7.4},
+        "location": "Al Ain community health screening",
+        "summary": {
+            "en": "Your blood test from the community screening last week has come back from the laboratory.",
+            "ar": "وصلت من المختبر نتيجة تحليل الدم الذي أُجري لك في الفحص المجتمعي الأسبوع الماضي.",
+        },
+    },
+}
+
 STAMP = {
     "contacted": ["first_contact_at"],
     "acknowledged": ["first_contact_at", "acknowledged_at"],
@@ -80,7 +108,7 @@ async def _sample(i: int, row: tuple) -> None:
     await cases.log_event(case["_id"], "system", "status_changed", {"from": "new", "to": status, "note": note or "demo history"})
 
 
-async def reset(*, phone: str = "", name: str = "", lang: str = "") -> dict:
+async def reset(*, scenario: str = "cervical", phone: str = "", name: str = "", lang: str = "") -> dict:
     """Wipe cases and rebuild the demo board. Staff accounts are kept."""
     for coll in ("cases", "messages", "events", "calls", "patients"):
         await db()[coll].delete_many({})
@@ -90,19 +118,17 @@ async def reset(*, phone: str = "", name: str = "", lang: str = "") -> dict:
     phone = phone or settings.app.demo_patient_phone
     live = None
     if phone:
+        sc = SCENARIOS.get(scenario) or SCENARIOS["cervical"]
         live = await cases.create_case(
             phone=phone,
-            display_name=name or settings.app.demo_patient_name,
-            language=lang or settings.app.demo_patient_lang,
+            display_name=name or sc["name"],
+            language=lang or sc["language"],
             emirates_id="784-1985-1234567-1",
             region="al_ain",
             insurance="Thiqa",
-            # Cervical screening: the sample is taken on the day and read by the
-            # lab one to two weeks later, after the woman has gone home. That
-            # gap is where people are lost, which is what the demo shows.
-            readings={"cervical_cytology": "HSIL, HPV 16 positive"},
-            location="Al Ain women's health screening unit",
-            result_summary="The laboratory has now read the sample taken at your screening visit about two weeks ago.",
+            readings=sc["readings"],
+            location=sc["location"],
+            result_summary=sc["summary"][lang or sc["language"]],
             source="demo",
             actor="system",
         )
@@ -111,8 +137,8 @@ async def reset(*, phone: str = "", name: str = "", lang: str = "") -> dict:
         ref = {**live["referral"], "status": "accepted", "responder": "Dr. Yusuf Clinician", "responded_at": now()}
         await cases.update_case(live["_id"], {"next_action_at": None, "next_action": "outreach", "demo_live": True, "referral": ref})
         await cases.log_event(live["_id"], "staff", "referral_accepted", {"facility": ref["facility_name"], "by": ref["responder"], "note": ""})
-    logger.info("Demo reset: %d samples, live case %s", len(SAMPLES), live["_id"] if live else None)
-    return {"samples": len(SAMPLES), "live_case": live["_id"] if live else None}
+    logger.info("Demo reset (%s): %d samples, live case %s", scenario, len(SAMPLES), live["_id"] if live else None)
+    return {"samples": len(SAMPLES), "live_case": live["_id"] if live else None, "scenario": scenario}
 
 
 async def outreach(case: dict, *, channel: str, actor_id: str | None) -> dict:

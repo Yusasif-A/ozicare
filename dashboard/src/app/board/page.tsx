@@ -89,27 +89,32 @@ export default function Board() {
           placeholder="Search name, phone or case id"
           className="ml-auto w-64 rounded-lg border-0 px-3 py-2 text-sm ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-teal-600"
         />
-        {getUser()?.role === "admin" && (
-          <button
-            disabled={resetting}
-            onClick={async () => {
-              if (!window.confirm("Reset the demo? This deletes every case and fills the board with demo patients.")) return;
-              setResetting(true);
-              try {
-                const r = await post<{ live_case: string | null }>("/api/demo/reset", {});
-                if (r.live_case) window.location.href = `/case?id=${r.live_case}`;
-                else await load();
-              } catch (e) {
-                setError(e instanceof Error ? e.message : "Reset failed");
-              } finally {
-                setResetting(false);
-              }
-            }}
-            className="rounded-lg px-3 py-2 text-sm font-medium text-slate-600 ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:opacity-50"
-          >
-            {resetting ? "Resetting…" : "Reset demo"}
-          </button>
-        )}
+        {getUser()?.role === "admin" &&
+          [
+            { scenario: "cervical", label: "Demo: cervical (EN)" },
+            { scenario: "diabetes", label: "Demo: diabetes (AR)" },
+          ].map((d) => (
+            <button
+              key={d.scenario}
+              disabled={resetting}
+              onClick={async () => {
+                if (!window.confirm(`Start the ${d.label} demo? This deletes every case and fills the board with demo patients.`)) return;
+                setResetting(true);
+                try {
+                  const r = await post<{ live_case: string | null }>("/api/demo/reset", { scenario: d.scenario });
+                  if (r.live_case) window.location.href = `/case?id=${r.live_case}`;
+                  else await load();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : "Reset failed");
+                } finally {
+                  setResetting(false);
+                }
+              }}
+              className="rounded-lg px-3 py-2 text-sm font-medium text-slate-600 ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {resetting ? "Resetting…" : d.label}
+            </button>
+          ))}
         <Link href="/cases/new" className="rounded-lg bg-teal-700 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-teal-800">
           + New case
         </Link>

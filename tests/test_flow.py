@@ -378,6 +378,11 @@ def test_demo_reset_fills_board_and_outreach_messages():
         assert any(p["type"] == "interactive" and p["interactive"]["type"] == "voice_call" for p in SENT[n:])
         live = await cases.get_case(live["_id"])
         assert live["status"] == "contacted" and live["referral"]["status"] == "accepted"
+        # Second demo: diabetes in Arabic, routed to endocrinology, not urgent.
+        res = await demo.reset(scenario="diabetes", phone="+971500000099")
+        d = await cases.get_case(res["live_case"])
+        assert d["language"] == "ar" and d["pathway"] == "diabetes" and d["urgency"] == "soon"
+        assert d["referral"]["service"] == "endocrinology" and "المختبر" in d["result_summary"]
 
     run(go())
 

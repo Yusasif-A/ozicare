@@ -396,6 +396,7 @@ async def outreach(case_id: str, user: Navigator, channel: str = "whatsapp") -> 
 
 
 class DemoReset(BaseModel):
+    scenario: str = "cervical"
     phone: str = ""
     name: str = ""
     language: str = ""
@@ -404,8 +405,10 @@ class DemoReset(BaseModel):
 @app.post("/api/demo/reset")
 async def demo_reset(body: DemoReset, _: Admin) -> dict:
     """Wipe cases and fill the board with demo data (admin only)."""
+    if body.scenario not in demo.SCENARIOS:
+        raise HTTPException(400, f"scenario must be one of {tuple(demo.SCENARIOS)}")
     try:
-        return await demo.reset(phone=body.phone, name=body.name, lang=body.language)
+        return await demo.reset(scenario=body.scenario, phone=body.phone, name=body.name, lang=body.language)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
