@@ -115,6 +115,15 @@ def _build_stt(lang: str, vad) -> object:
             language_code=code,
             secondary_languages=["en" if code == "ar" else "ar"],
             keyterms=[settings.app.name, settings.app.org_name[:50]],
+            # Without server VAD the plugin uses manual commits: a transcript is
+            # only finalised when the turn times out, which added ~3s of dead
+            # air to every reply on a live call. Let Scribe commit on silence.
+            server_vad={
+                "vad_silence_threshold_secs": 0.6,
+                "vad_threshold": 0.4,
+                "min_speech_duration_ms": 120,
+                "min_silence_duration_ms": 300,
+            },
         )
     from livekit.agents import stt as agents_stt
 
@@ -291,9 +300,22 @@ async def entrypoint(ctx: JobContext) -> None:
     vad = ctx.proc.userdata["vad"]
     session = AgentSession(
         vad=vad,
-        allow_interruptions=True,
-        min_interruption_duration=0.3,
-        llm=openai.LLM(base_url=settings.llm.base_url, model=settings.llm.model, api_key=settings.llm.api_key),
+        # Short endpointing so the agent answers as soon as the patient stops,
+        # and the LLM starts on the transcript before the turn is confirmed.
+        turn_handling={
+            "endpointing": {"min_delay": 0.3, "max_delay": 1.5},
+            "interruption": {"enabled": True, "min_duration": 0.3},
+            "preemptive_generation": {"enabled": True},
+        },
+        # Thinking off: Gemma's reasoning channel adds latency and leaks
+        # "<|channel>thought" markup into the reply on a phone call.
+        llm=openai.LLM(
+            base_url=settings.llm.base_url,
+            model=settings.llm.model,
+            api_key=settings.llm.api_key,
+            temperature=0.3,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        ),
         stt=_build_stt(lang, vad),
         tts=_build_tts(lang),
     )
@@ -302,10 +324,13 @@ async def entrypoint(ctx: JobContext) -> None:
     @session.on("conversation_item_added")
     def _log_turn(ev) -> None:
         item = getattr(ev, "item", None)
+        direction = "inbound" if getattr(item, "role", "") == "user" else "outbound"
         text = (getattr(item, "text_content", None) or "").strip()
+        if direction == "outbound":
+            # What was spoken, not the model's reasoning-channel markup.
+            text = guard.sanitize_for_tts(text)
         if not text or not call.get("case_id"):
             return
-        direction = "inbound" if getattr(item, "role", "") == "user" else "outbound"
         asyncio.create_task(cases.log_message(call["case_id"], "voice", direction, text, meta={"call": call["_id"], "provider": "livekit"}, phone=call.get("phone")))
 
     try:

@@ -94,6 +94,14 @@ const EVENT_TONE: Record<string, string> = {
   consult_note: "text-indigo-700",
 };
 
+// Older call turns were saved with the model's reasoning markup
+// ("<|channel>thought<channel|>"); show only what was actually said.
+function cleanBody(body: string): string {
+  if (!body.includes("|>") && !body.includes("<|")) return body;
+  const parts = body.split(/<\s*channel\s*\|\s*>/);
+  return parts[parts.length - 1].replace(/<\s*\|[^>]*>\s*\w*/g, "").trim();
+}
+
 function Bubble({ m }: { m: Message }) {
   const inbound = m.direction === "inbound";
   const by = (m.meta?.by as string) ?? "";
@@ -123,7 +131,7 @@ function Bubble({ m }: { m: Message }) {
                     : "rounded-tr-sm bg-teal-700 text-white"
           }`}
         >
-          {m.body}
+          {cleanBody(m.body)}
           {failed && <div className="mt-1 text-xs text-red-700">Not delivered: {String(m.meta?.error)}</div>}
           {kind === "explain" && <div className="mt-1 text-[11px] opacity-75">Approved template</div>}
         </div>
