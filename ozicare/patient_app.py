@@ -1,29 +1,37 @@
 """
-The patient's own page: OziCare's patient app, reached from a link in the
-WhatsApp messages (PATIENT_APP_URL/p?t=<token>).
+The patient's own page: OziCare's patient app.
 
-The token is long and random, so the link itself is the key, like a parcel-
-tracking link. It only ever shows what the WhatsApp conversation would show:
-until the person has confirmed who they are, the page asks them to, and says
-nothing about the result. Nothing here needs a staff login.
+Patients sign in with their phone number and a password. The link in their
+WhatsApp messages (PATIENT_APP_URL/p?t=<token>) opens the sign-in screen with
+the phone filled in; the token alone shows nothing. After sign-in the page is
+the same loop as WhatsApp: progress, the result explained, the referral, the
+appointment, and book / call me / ask.
+
+A patient's password is set by the care team. For the demo, the patient on
+DEMO_PATIENT_PHONE gets DEMO_PATIENT_PASSWORD. Signing in with the right
+password confirms the patient's identity, like replying YES on WhatsApp.
 
 In a deployment with a national health app, the same data comes out of the
-FHIR endpoints instead (see fhir.py); this page is the stand-in for the demo.
+FHIR endpoints instead (see fhir.py), behind that app's own login.
 """
 
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+import jwt
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from . import cases, content, guard, referrals
+from . import auth, cases, content, guard, referrals
 from .config import settings
 from .db import db, now
 
 router = APIRouter(prefix="/api/p", tags=["patient"])
+
+SESSION_HOURS = 12
 
 # Where the patient is in the loop, in their words.
 STEPS = ("result", "referral", "booked", "visit", "done")
@@ -56,13 +64,99 @@ def link_for(case: dict) -> str:
     return f"{base}/p?t={case['patient_token']}" if base and case.get("patient_token") else ""
 
 
-async def _by_token(token: str) -> dict:
+# --------------------------------------------------------------------------
+# Accounts and sessions
+# --------------------------------------------------------------------------
+
+
+async def set_password(patient_id: str, password: str) -> None:
+    await db().patients.update_one({"_id": patient_id}, {"$set": {"password_hash": auth.hash_password(password), "password_set_at": now()}})
+
+
+async def ensure_demo_account() -> None:
+    """The presenter's demo patient always has the known demo password."""
+    phone, pw = settings.app.demo_patient_phone, settings.app.demo_patient_password
+    if not phone or not pw:
+        return
+    try:
+        phone = cases.normalize_phone(phone)
+    except ValueError:
+        return
+    patient = await db().patients.find_one({"phone_e164": phone})
+    if patient and not (patient.get("password_hash") and auth.check_password(pw, patient["password_hash"])):
+        await set_password(patient["_id"], pw)
+
+
+def _issue(patient: dict) -> str:
+    if not settings.app.jwt_secret:
+        raise HTTPException(503, "JWT_SECRET is not set")
+    payload = {"sub": patient["_id"], "kind": "patient", "exp": now() + timedelta(hours=SESSION_HOURS)}
+    return jwt.encode(payload, settings.app.jwt_secret, algorithm="HS256")
+
+
+async def _patient_case(authorization: str | None) -> dict:
+    """The signed-in patient's current case: the open one, else the latest."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "sign in first")
+    try:
+        data = jwt.decode(authorization[7:], settings.app.jwt_secret, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        raise HTTPException(401, "session expired, sign in again") from None
+    if data.get("kind") != "patient":
+        raise HTTPException(401, "sign in first")
+    patient = await db().patients.find_one({"_id": data["sub"]})
+    if patient is None:
+        raise HTTPException(401, "account not found")
+    case = await cases.active_case_for_phone(patient["phone_e164"]) or await cases.latest_case_for_phone(patient["phone_e164"])
+    if case is None:
+        raise HTTPException(404, "no follow-up for this account")
+    return case
+
+
+PatientAuth = Annotated[str | None, Header()]
+
+
+class Login(BaseModel):
+    phone: str
+    password: str
+
+
+@router.get("/link/{token}")
+async def link_info(token: str) -> dict:
+    """What the sign-in screen may show for a WhatsApp link: phone, masked."""
     if not token or len(token) < 16:
         raise HTTPException(404, "link not found")
     case = await db().cases.find_one({"patient_token": token})
     if case is None:
         raise HTTPException(404, "link not found")
-    return case
+    phone = case["phone"]
+    return {"phone": phone, "phone_masked": f"{phone[:4]} ••• {phone[-4:]}", "language": case.get("language", "en")}
+
+
+@router.post("/login")
+async def login(body: Login) -> dict:
+    try:
+        phone = cases.normalize_phone(body.phone)
+    except ValueError:
+        raise HTTPException(401, "wrong phone number or password") from None
+    patient = await db().patients.find_one({"phone_e164": phone})
+    if not patient or not patient.get("password_hash") or not auth.check_password(body.password, patient["password_hash"]):
+        raise HTTPException(401, "wrong phone number or password")
+    case = await cases.active_case_for_phone(phone) or await cases.latest_case_for_phone(phone)
+    # The right password proves who they are: the same consent as YES on WhatsApp.
+    if case and not case.get("identity_confirmed") and case["status"] not in cases.CLOSED:
+        await cases.update_case(case["_id"], {"identity_confirmed": True})
+        await db().patients.update_one({"_id": patient["_id"]}, {"$set": {"consent_at": now()}})
+        await cases.log_event(case["_id"], "patient", "identity_confirmed", {"consent": True, "channel": "patient_app"})
+        case = await cases.acknowledge(await cases.get_case(case["_id"]), channel="patient_app")
+    if case:
+        await cases.log_event(case["_id"], "patient", "patient_signed_in", {})
+    return {"token": _issue(patient), "language": (case or {}).get("language", patient.get("preferred_language", "en"))}
+
+
+# --------------------------------------------------------------------------
+# The page
+# --------------------------------------------------------------------------
 
 
 def _view(case: dict, lang: str | None = None) -> dict:
@@ -75,8 +169,6 @@ def _view(case: dict, lang: str | None = None) -> dict:
         "status": case["status"],
         "closed": case["status"] in cases.CLOSED,
     }
-    if not case.get("identity_confirmed"):
-        return base
     s = content.screening(case["screening_type"], lang)
     ref = case.get("referral") or {}
     clinic = referrals.clinic_for(case, lang)
@@ -103,52 +195,28 @@ def _view(case: dict, lang: str | None = None) -> dict:
     }
 
 
-@router.get("/{token}")
-async def view(token: str, lang: str | None = None) -> dict:
-    case = await _by_token(token)
+@router.get("/me")
+async def view(authorization: PatientAuth = None, lang: str | None = None) -> dict:
+    case = await _patient_case(authorization)
     if not case.get("patient_page_opened_at"):
         await cases.update_case(case["_id"], {"patient_page_opened_at": now()})
         await cases.log_event(case["_id"], "patient", "patient_page_opened", {})
     return _view(case, lang)
 
 
-class Confirm(BaseModel):
-    is_me: bool
-
-
-@router.post("/{token}/confirm")
-async def confirm(token: str, body: Confirm) -> dict:
-    case = await _by_token(token)
+def _require_open(case: dict) -> None:
     if case["status"] in cases.CLOSED:
-        return _view(case)
-    if not body.is_me:
-        from . import conversation
-
-        await conversation.escalate_with_summary(case, "Person who opened the patient link says they are not the patient — check the phone number", actor="patient")
-        return {**_view(case), "wrong_person": True}
-    if not case.get("identity_confirmed"):
-        await cases.update_case(case["_id"], {"identity_confirmed": True})
-        await db().patients.update_one({"_id": case["patient_id"]}, {"$set": {"consent_at": now()}})
-        await cases.log_event(case["_id"], "patient", "identity_confirmed", {"consent": True, "channel": "patient_app"})
-    case = await cases.acknowledge(await cases.get_case(case["_id"]), channel="patient_app")
-    return _view(case)
+        raise HTTPException(409, "this follow-up is closed")
 
 
 class Book(BaseModel):
     slot_iso: str
 
 
-def _require_identity(case: dict) -> None:
-    if not case.get("identity_confirmed"):
-        raise HTTPException(403, "confirm who you are first")
-    if case["status"] in cases.CLOSED:
-        raise HTTPException(409, "this follow-up is closed")
-
-
-@router.post("/{token}/book")
-async def book(token: str, body: Book) -> dict:
-    case = await _by_token(token)
-    _require_identity(case)
+@router.post("/me/book")
+async def book(body: Book, authorization: PatientAuth = None) -> dict:
+    case = await _patient_case(authorization)
+    _require_open(case)
     slot = next((s for s in cases.next_slots(case["language"]) if s["iso"] == body.slot_iso), None)
     if slot is None:
         raise HTTPException(409, "that time is no longer available, please pick another")
@@ -161,10 +229,10 @@ async def book(token: str, body: Book) -> dict:
     return _view(case)
 
 
-@router.post("/{token}/call")
-async def call_me(token: str) -> dict:
-    case = await _by_token(token)
-    _require_identity(case)
+@router.post("/me/call")
+async def call_me(authorization: PatientAuth = None) -> dict:
+    case = await _patient_case(authorization)
+    _require_open(case)
     await cases.update_case(case["_id"], {"callback_requested_at": now()})
     await cases.log_event(case["_id"], "patient", "callback_requested", {"channel": "patient_app"})
     return _view(await cases.get_case(case["_id"]))
@@ -175,11 +243,11 @@ class Question(BaseModel):
     lang: str | None = None
 
 
-@router.post("/{token}/ask")
-async def ask(token: str, body: Question) -> dict:
+@router.post("/me/ask")
+async def ask(body: Question, authorization: PatientAuth = None) -> dict:
     """A free-text question, answered by the same guarded LLM as WhatsApp."""
-    case = await _by_token(token)
-    _require_identity(case)
+    case = await _patient_case(authorization)
+    _require_open(case)
     text = body.text.strip()[:500]
     if not text:
         raise HTTPException(400, "empty question")

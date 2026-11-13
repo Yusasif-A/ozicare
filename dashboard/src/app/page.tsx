@@ -21,7 +21,10 @@ export default function Home() {
       <header className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-5 sm:px-6">
         <span className="grid h-9 w-9 place-items-center rounded-xl bg-teal-700 text-sm font-bold text-white">OC</span>
         <span className="text-lg font-semibold">OziCare</span>
-        <Link href="/login" className="ml-auto rounded-lg px-3 py-2 text-sm font-medium text-teal-800 ring-1 ring-inset ring-teal-200 hover:bg-teal-50">
+        <Link href="/p" className="ml-auto rounded-lg bg-teal-700 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-teal-800">
+          Patient sign in
+        </Link>
+        <Link href="/login" className="rounded-lg px-3 py-2 text-sm font-medium text-teal-800 ring-1 ring-inset ring-teal-200 hover:bg-teal-50">
           Staff sign in
         </Link>
       </header>

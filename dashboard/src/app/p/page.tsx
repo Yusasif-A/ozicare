@@ -11,7 +11,6 @@ type View = {
   identity_confirmed: boolean;
   status: string;
   closed: boolean;
-  wrong_person?: boolean;
   step?: string;
   steps?: string[];
   screening?: string;
@@ -34,10 +33,6 @@ const L = {
   en: {
     hello: "Hello",
     follow: "Your screening follow-up",
-    confirmQ: (n: string) => `To protect your privacy, please confirm you are ${n} before we show any details.`,
-    yes: "Yes, this is me",
-    no: "No, that's not me",
-    wrong: "Thank you for telling us. We won't contact this number about this again.",
     steps: { result: "Result", referral: "Referral", booked: "Booked", visit: "Visit", done: "Done" } as Record<string, string>,
     about: "About your result",
     next: "What to do next",
@@ -53,18 +48,22 @@ const L = {
     askPh: "Type your question…",
     send: "Send",
     closed: "This follow-up is closed. If you need anything, message us on WhatsApp.",
-    notFound: "This link is not valid. Please use the link in your WhatsApp message.",
     urgent: "This follow-up is important. Please act today.",
     lang: "العربية",
     loading: "Loading…",
+    signIn: "Sign in",
+    signInTitle: "Sign in to see your follow-up",
+    signInSub: "Use the phone number we messaged and the password from your care team.",
+    phone: "Phone number",
+    password: "Password",
+    signingIn: "Signing in…",
+    signOut: "Sign out",
+    badLogin: "Wrong phone number or password.",
+    private: "Your result is private. We only show it after you sign in.",
   },
   ar: {
     hello: "مرحباً",
     follow: "متابعة فحصك",
-    confirmQ: (n: string) => `حفاظاً على خصوصيتك، يرجى تأكيد أنك ${n} قبل أن نعرض أي تفاصيل.`,
-    yes: "نعم، أنا",
-    no: "لا، لست أنا",
-    wrong: "شكراً لإبلاغنا. لن نتواصل مع هذا الرقم بخصوص هذا الأمر مرة أخرى.",
     steps: { result: "النتيجة", referral: "الإحالة", booked: "الحجز", visit: "الزيارة", done: "اكتمل" } as Record<string, string>,
     about: "عن نتيجتك",
     next: "الخطوات التالية",
@@ -80,17 +79,51 @@ const L = {
     askPh: "اكتب سؤالك…",
     send: "إرسال",
     closed: "اكتملت هذه المتابعة. إذا احتجت أي شيء، راسلنا على واتساب.",
-    notFound: "هذا الرابط غير صالح. يرجى استخدام الرابط في رسالة واتساب.",
     urgent: "هذه المتابعة مهمة. يرجى التصرف اليوم.",
     lang: "English",
     loading: "جارٍ التحميل…",
+    signIn: "تسجيل الدخول",
+    signInTitle: "سجّل الدخول لمتابعة نتيجتك",
+    signInSub: "استخدم رقم الهاتف الذي راسلناك عليه وكلمة المرور من فريق الرعاية.",
+    phone: "رقم الهاتف",
+    password: "كلمة المرور",
+    signingIn: "جارٍ تسجيل الدخول…",
+    signOut: "تسجيل الخروج",
+    badLogin: "رقم الهاتف أو كلمة المرور غير صحيحة.",
+    private: "نتيجتك خاصة، ولا نعرضها إلا بعد تسجيل الدخول.",
   },
 };
 
+const SESSION_KEY = "ozicare.patient";
+
+function getSession(): string | null {
+  try {
+    return localStorage.getItem(SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setSession(token: string | null) {
+  try {
+    if (token) localStorage.setItem(SESSION_KEY, token);
+    else localStorage.removeItem(SESSION_KEY);
+  } catch {}
+}
+
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
 async function call<T>(path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" };
+  const session = getSession();
+  if (session) headers.Authorization = `Bearer ${session}`;
   const res = await fetch(`${getApiBase()}/api/p/${path}`, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) {
@@ -98,7 +131,7 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
     try {
       msg = (await res.json()).detail ?? msg;
     } catch {}
-    throw new Error(String(msg));
+    throw new HttpError(res.status, String(msg));
   }
   return res.json();
 }
@@ -115,7 +148,9 @@ function Patient() {
   const token = useSearchParams().get("t") ?? "";
   const [v, setV] = useState<View | null>(null);
   const [lang, setLang] = useState<"en" | "ar" | null>(null);
-  const [missing, setMissing] = useState(false);
+  const [needLogin, setNeedLogin] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [slot, setSlot] = useState("");
@@ -124,19 +159,50 @@ function Patient() {
 
   const load = useCallback(
     async (l?: "en" | "ar" | null) => {
+      if (!getSession()) {
+        setNeedLogin(true);
+        return;
+      }
       try {
-        const data = await call<View>(`${token}${l ? `?lang=${l}` : ""}`);
-        setV(data);
-      } catch {
-        setMissing(true);
+        setV(await call<View>(`me${l ? `?lang=${l}` : ""}`));
+        setNeedLogin(false);
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 401) setSession(null);
+        setNeedLogin(true);
       }
     },
-    [token],
+    [],
   );
 
   useEffect(() => {
+    // A WhatsApp link fills in the phone; the link itself shows nothing else.
+    if (token) {
+      call<{ phone: string; language: "en" | "ar" }>(`link/${token}`)
+        .then((info) => {
+          setPhone(info.phone);
+          setLang((l) => l ?? info.language);
+        })
+        .catch(() => {});
+    }
     load();
-  }, [load]);
+  }, [load, token]);
+
+  async function signIn(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await call<{ token: string; language: "en" | "ar" }>("login", { phone, password });
+      setSession(r.token);
+      setPassword("");
+      setLang((l) => l ?? r.language);
+      await load(lang ?? r.language);
+    } catch {
+      setErr(L[lang ?? "en"].badLogin);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const t = L[lang ?? v?.language ?? "en"];
   const ar = (lang ?? v?.language) === "ar";
@@ -145,9 +211,8 @@ function Patient() {
     setBusy(true);
     setErr(null);
     try {
-      const next = await call<View>(`${token}/${path}`, body);
-      if (next.wrong_person) setV(next);
-      else await load(lang);
+      await call<View>(`me/${path}`, body);
+      await load(lang);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -163,7 +228,7 @@ function Patient() {
     setChat((c) => [...c, { who: "me", text }]);
     setBusy(true);
     try {
-      const r = await call<{ reply: string }>(`${token}/ask`, { text, lang: lang ?? v?.language });
+      const r = await call<{ reply: string }>("me/ask", { text, lang: lang ?? v?.language });
       setChat((c) => [...c, { who: "oc", text: r.reply }]);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Something went wrong");
@@ -172,30 +237,70 @@ function Patient() {
     }
   }
 
-  if (missing || !token) {
+  const tl = L[lang ?? "en"];
+  const arLogin = (lang ?? "en") === "ar";
+
+  if (needLogin) {
     return (
-      <Frame ar={false}>
-        <p className="p-6 text-center text-slate-600">
-          {L.en.notFound}
-          <br />
-          <span dir="rtl">{L.ar.notFound}</span>
-        </p>
+      <Frame ar={arLogin}>
+        <div className="bg-teal-700 px-5 pb-8 pt-5 text-white">
+          <div className="flex items-center">
+            <span className="grid h-7 w-7 place-items-center rounded-lg bg-white/15 text-[11px] font-bold">OC</span>
+            <span className="ms-2 text-sm font-medium opacity-90">OziCare</span>
+            <button className="ms-auto rounded-full bg-white/15 px-3 py-1 text-xs font-medium hover:bg-white/25" onClick={() => setLang(arLogin ? "en" : "ar")}>
+              {tl.lang}
+            </button>
+          </div>
+          <h1 className="mt-5 text-2xl font-semibold">{tl.signInTitle}</h1>
+          <p className="mt-1 text-sm opacity-90">{tl.signInSub}</p>
+        </div>
+        <form onSubmit={signIn} className="space-y-4 p-5">
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-slate-700">{tl.phone}</span>
+            <input
+              dir="ltr"
+              inputMode="tel"
+              autoComplete="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="+971 50 000 0000"
+              required
+              className="w-full rounded-xl px-4 py-3 text-base ring-1 ring-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-600"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-slate-700">{tl.password}</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className="w-full rounded-xl px-4 py-3 text-base ring-1 ring-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-600"
+            />
+          </label>
+          {err && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</p>}
+          <button disabled={busy} className="w-full rounded-xl bg-teal-700 py-3 font-semibold text-white disabled:opacity-50">
+            {busy ? tl.signingIn : tl.signIn}
+          </button>
+          <p className="text-center text-xs text-slate-500">🔒 {tl.private}</p>
+        </form>
       </Frame>
     );
   }
   if (!v) {
     return (
-      <Frame ar={false}>
-        <p className="p-6 text-center text-slate-400">{L.en.loading}</p>
+      <Frame ar={arLogin}>
+        <p className="p-6 text-center text-slate-400">{tl.loading}</p>
       </Frame>
     );
   }
 
   const header = (
     <div className="bg-teal-700 px-5 pb-6 pt-5 text-white">
-      <div className="flex items-center">
+      <div className="flex items-center gap-2">
         <span className="grid h-7 w-7 place-items-center rounded-lg bg-white/15 text-[11px] font-bold">OC</span>
-        <span className="ms-2 text-sm font-medium opacity-90">OziCare</span>
+        <span className="text-sm font-medium opacity-90">OziCare</span>
         <button
           className="ms-auto rounded-full bg-white/15 px-3 py-1 text-xs font-medium hover:bg-white/25"
           onClick={() => {
@@ -206,6 +311,16 @@ function Patient() {
         >
           {t.lang}
         </button>
+        <button
+          className="rounded-full bg-white/15 px-3 py-1 text-xs font-medium hover:bg-white/25"
+          onClick={() => {
+            setSession(null);
+            setV(null);
+            setNeedLogin(true);
+          }}
+        >
+          {t.signOut}
+        </button>
       </div>
       <h1 className="mt-4 text-2xl font-semibold">
         {t.hello} {v.first_name}
@@ -213,32 +328,6 @@ function Patient() {
       <p className="text-sm opacity-90">{v.screening ?? t.follow}</p>
     </div>
   );
-
-  if (v.wrong_person) {
-    return (
-      <Frame ar={ar}>
-        {header}
-        <p className="p-6 text-slate-700">{t.wrong}</p>
-      </Frame>
-    );
-  }
-
-  if (!v.identity_confirmed) {
-    return (
-      <Frame ar={ar}>
-        {header}
-        <div className="space-y-4 p-5">
-          <p className="text-slate-700">{t.confirmQ(v.first_name)}</p>
-          <button disabled={busy} onClick={() => act("confirm", { is_me: true })} className="w-full rounded-xl bg-teal-700 py-3 font-semibold text-white disabled:opacity-50">
-            {t.yes}
-          </button>
-          <button disabled={busy} onClick={() => act("confirm", { is_me: false })} className="w-full rounded-xl bg-white py-3 font-semibold text-slate-700 ring-1 ring-slate-300 disabled:opacity-50">
-            {t.no}
-          </button>
-        </div>
-      </Frame>
-    );
-  }
 
   const stepIdx = v.steps?.indexOf(v.step ?? "") ?? 0;
 

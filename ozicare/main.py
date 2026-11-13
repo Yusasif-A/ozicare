@@ -43,6 +43,7 @@ async def lifespan(_: FastAPI):
     await auth.seed_staff()
     try:
         await demo.seed_if_empty()
+        await patient_app.ensure_demo_account()
     except Exception:  # noqa: BLE001 - demo data must never stop the API starting
         logger.exception("Demo seed failed")
     stop = asyncio.Event()

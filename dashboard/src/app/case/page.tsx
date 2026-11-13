@@ -354,7 +354,7 @@ function CaseView() {
             target="_blank"
             rel="noreferrer"
             className="ml-auto rounded-lg px-2.5 py-1 font-medium text-teal-800 ring-1 ring-inset ring-teal-200 hover:bg-teal-50"
-            title="Opens exactly what the patient sees (actions there count as the patient's)"
+            title="Opens the patient sign-in, as the WhatsApp link does (the patient signs in with their phone and password)"
           >
             Open patient page ↗
           </a>

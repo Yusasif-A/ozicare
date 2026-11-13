@@ -236,6 +236,11 @@ async def _live_case(scenario: str, phone: str = "", name: str = "", lang: str =
     ref = {**case["referral"], "status": "accepted", "responder": "Dr. Yusuf Clinician", "responded_at": now()}
     await cases.update_case(case["_id"], {"next_action_at": None, "next_action": "outreach", "demo_live": True, "demo_scenario": scenario, "referral": ref})
     await cases.log_event(case["_id"], "staff", "referral_accepted", {"facility": ref["facility_name"], "by": ref["responder"], "note": ""})
+    # The presenter signs in to the patient page with DEMO_PATIENT_PASSWORD.
+    from .patient_app import set_password
+
+    if settings.app.demo_patient_password:
+        await set_password(case["patient_id"], settings.app.demo_patient_password)
     return case
 
 

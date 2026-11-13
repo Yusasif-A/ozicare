@@ -304,7 +304,7 @@ def test_no_show_rebooks_then_attended_closes_loop():
     run(go())
 
 
-def test_patient_page_gated_then_books():
+def test_patient_page_needs_sign_in_then_books():
     async def go():
         from fastapi import HTTPException
 
@@ -314,19 +314,28 @@ def test_patient_page_gated_then_books():
         case = await cases.create_case(phone=phone, display_name="Noura S", language="ar", readings={"hba1c": 7.0})
         await conversation.contact_patient(case)
         assert "/p?t=" in _texts()[-1]
-        token = case["patient_token"]
-        v = await patient_app.view(token)
-        assert not v["identity_confirmed"] and "explain" not in v and "referral" not in v  # nothing before identity
+        # The link alone shows nothing but a masked phone for the sign-in form.
+        info = await patient_app.link_info(case["patient_token"])
+        assert info["phone"] == phone and "•••" in info["phone_masked"] and "explain" not in info
         with pytest.raises(HTTPException):
-            await patient_app.book(token, patient_app.Book(slot_iso=cases.next_slots("ar")[0]["iso"]))
-        v = await patient_app.confirm(token, patient_app.Confirm(is_me=True))
-        assert v["identity_confirmed"] and v["referral"]["clinic"] and v["slots"]
-        assert (await patient_app.view(token, "en"))["screening"].startswith("blood sugar")
-        v = await patient_app.book(token, patient_app.Book(slot_iso=v["slots"][0]["iso"]))
+            await patient_app.view(None)
+        with pytest.raises(HTTPException):
+            await patient_app.login(patient_app.Login(phone=phone, password="anything"))  # no password set yet
+        await patient_app.set_password(case["patient_id"], "Noura-pass-1")
+        with pytest.raises(HTTPException):
+            await patient_app.login(patient_app.Login(phone=phone, password="wrong"))
+        res = await patient_app.login(patient_app.Login(phone="00971500000016", password="Noura-pass-1"))
+        bearer = f"Bearer {res['token']}"
+        # Signing in confirms identity, like YES on WhatsApp.
+        assert (await cases.get_case(case["_id"]))["identity_confirmed"]
+        v = await patient_app.view(bearer)
+        assert v["referral"]["clinic"] and v["slots"]
+        assert (await patient_app.view(bearer, "en"))["screening"].startswith("blood sugar")
+        v = await patient_app.book(patient_app.Book(slot_iso=v["slots"][0]["iso"]), bearer)
         assert v["appointment"] and v["step"] == "booked"
         assert (await cases.get_case(case["_id"]))["status"] == "booked"
         with pytest.raises(HTTPException):
-            await patient_app.view("x" * 24)
+            await patient_app.view("Bearer not-a-token")
         assert "patient_token" not in cases.public(case) and "/p?t=" in cases.public(case)["patient_link"]
 
     run(go())
@@ -405,6 +414,10 @@ def test_demo_autoseed_on_empty_database():
         live = [c async for c in db().cases.find({"demo_live": True, "status": "new"})]
         assert len(live) == 1 and live[0]["next_action_at"] is None  # ready for Notify, nothing sent
         assert (await scheduler.tick())["contacted"] == 0
+        from ozicare import patient_app
+
+        res = await patient_app.login(patient_app.Login(phone="+971500000098", password=settings.app.demo_patient_password))
+        assert res["token"]
 
     run(go())
 
