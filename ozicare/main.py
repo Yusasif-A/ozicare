@@ -41,6 +41,10 @@ async def lifespan(_: FastAPI):
     settings.log_summary()
     await ensure_indexes()
     await auth.seed_staff()
+    try:
+        await demo.seed_if_empty()
+    except Exception:  # noqa: BLE001 - demo data must never stop the API starting
+        logger.exception("Demo seed failed")
     stop = asyncio.Event()
     task = asyncio.create_task(scheduler.run_forever(stop))
     yield

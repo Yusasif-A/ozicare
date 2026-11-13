@@ -6,7 +6,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import Shell from "@/components/Shell";
 import { Button, Card, ErrorNote, OverduePill, RiskPill, StatusPill, UrgencyPill, inputCls } from "@/components/ui";
 import { api, getUser, post, type CaseDetail, type Event, type Message, type Meta, type User } from "@/lib/api";
-import { ACTION_LABEL, PATHWAY_LABEL, REFERRAL_STYLE, REGION_LABEL, SCREENING_LABEL, STATUS_LABEL, ago, isClosed, when } from "@/lib/format";
+import { ACTION_LABEL, PATHWAY_LABEL, REFERRAL_STYLE, REGION_LABEL, SCREENING_LABEL, STATUS_LABEL, ago, apptLabel, isClosed, when } from "@/lib/format";
 
 type Item = { kind: "msg"; at: string; msg: Message } | { kind: "event"; at: string; ev: Event };
 
@@ -396,81 +396,92 @@ function CaseView() {
 
         {/* Actions */}
         {!closed ? (
-          <div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
-            {c.status === "booked" && (
-              <>
-                <Button variant="primary" disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/attendance`, { attended: true }))}>
-                  ✓ Attended
-                </Button>
+          <div className="mt-5 border-t border-slate-100 pt-4">
+            {/* Reach the patient: the main action on this page. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="primary"
+                className="px-4 py-2.5 text-[15px] shadow-md"
+                disabled={busy}
+                title="Sends the WhatsApp message with the patient page link and a 'Talk to us' call button; the patient calls when ready"
+                onClick={() => act(() => post(`/api/cases/${id}/outreach?channel=invite`))}
+              >
+                📲 {c.first_contact_at ? "Notify patient again" : "Notify patient"}
+              </Button>
+              <Button
+                disabled={busy || !meta?.channels.whatsapp_call}
+                title="Sends the message, then the AI rings them on WhatsApp (blocked by Meta for some countries, e.g. +234)"
+                onClick={() =>
+                  act(async () => {
+                    const r = await post<{ call_error: string | null }>(`/api/cases/${id}/outreach?channel=whatsapp`);
+                    if (r.call_error) setError(`Message sent. WhatsApp call: ${r.call_error}`);
+                  })
+                }
+              >
+                AI calls on WhatsApp
+              </Button>
+              <Button
+                disabled={busy || !meta?.channels.phone_call}
+                title={meta?.channels.phone_call ? "Sends the WhatsApp message, then the AI rings the phone number (Bimpe)" : "Phone calls need BIMPEAI_AGENT_ID"}
+                onClick={() =>
+                  act(async () => {
+                    const r = await post<{ call_error: string | null }>(`/api/cases/${id}/outreach?channel=phone`);
+                    if (r.call_error) setError(`Message sent. Phone call: ${r.call_error}`);
+                  })
+                }
+              >
+                AI calls phone
+              </Button>
+              {c.status === "booked" && (
+                <>
+                  <span className="mx-1 h-6 w-px bg-slate-200" />
+                  <Button variant="primary" disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/attendance`, { attended: true }))}>
+                    ✓ Attended
+                  </Button>
+                  <Button
+                    disabled={busy}
+                    onClick={() => {
+                      const n = window.prompt("No-show: any note? (the patient gets a re-booking message)", "");
+                      if (n !== null) act(() => post(`/api/cases/${id}/attendance`, { attended: false, note: n }));
+                    }}
+                  >
+                    ✗ Did not attend
+                  </Button>
+                </>
+              )}
+              {c.status !== "escalated" && (
                 <Button
+                  variant="danger"
+                  className="ml-auto"
                   disabled={busy}
                   onClick={() => {
-                    const n = window.prompt("No-show: any note? (the patient gets a re-booking message)", "");
-                    if (n !== null) act(() => post(`/api/cases/${id}/attendance`, { attended: false, note: n }));
+                    const reason = window.prompt("Why are you escalating this case?");
+                    if (reason) act(() => post(`/api/cases/${id}/escalate`, { reason }));
                   }}
                 >
-                  ✗ Did not attend
+                  Escalate
                 </Button>
-              </>
-            )}
-            {progress.map((s) => (
-              <Button key={s} variant="primary" disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/status`, { status: s }))}>
-                {ACTION_LABEL[s] ?? s}
-              </Button>
-            ))}
-            {closes.map((s) => (
-              <Button key={s} disabled={busy} onClick={() => setClosing(s)}>
-                {ACTION_LABEL[s] ?? s}
-              </Button>
-            ))}
-            <span className="mx-1 w-px bg-slate-200" />
-            <Button
-              variant="primary"
-              disabled={busy}
-              title="Sends the WhatsApp message with the patient page link and a 'Talk to us' call button; the patient calls when ready"
-              onClick={() => act(() => post(`/api/cases/${id}/outreach?channel=invite`))}
-            >
-              📲 Notify patient
-            </Button>
-            <Button
-              disabled={busy || !meta?.channels.whatsapp_call}
-              title="Sends the message, then the AI rings them on WhatsApp (blocked by Meta for some countries, e.g. +234)"
-              onClick={() =>
-                act(async () => {
-                  const r = await post<{ call_error: string | null }>(`/api/cases/${id}/outreach?channel=whatsapp`);
-                  if (r.call_error) setError(`Message sent. WhatsApp call: ${r.call_error}`);
-                })
-              }
-            >
-              AI calls on WhatsApp
-            </Button>
-            <Button
-              disabled={busy || !meta?.channels.phone_call}
-              title={meta?.channels.phone_call ? "Sends the WhatsApp message, then the AI rings the phone number (Bimpe)" : "Phone calls need BIMPEAI_AGENT_ID"}
-              onClick={() =>
-                act(async () => {
-                  const r = await post<{ call_error: string | null }>(`/api/cases/${id}/outreach?channel=phone`);
-                  if (r.call_error) setError(`Message sent. Phone call: ${r.call_error}`);
-                })
-              }
-            >
-              AI calls phone
-            </Button>
-            <Button disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/contact`))}>
-              Message only
-            </Button>
-            {c.status !== "escalated" && (
-              <Button
-                variant="danger"
-                disabled={busy}
-                onClick={() => {
-                  const reason = window.prompt("Why are you escalating this case?");
-                  if (reason) act(() => post(`/api/cases/${id}/escalate`, { reason }));
-                }}
-              >
-                Escalate
-              </Button>
-            )}
+              )}
+            </div>
+            {/* Manual status changes, for staff working the case by hand. */}
+            <details className="mt-3 text-sm">
+              <summary className="cursor-pointer select-none text-xs font-semibold text-slate-500 hover:text-slate-800">More actions: update status or close the case</summary>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {progress.map((s) => (
+                  <Button key={s} disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/status`, { status: s }))}>
+                    {ACTION_LABEL[s] ?? s}
+                  </Button>
+                ))}
+                {closes.map((s) => (
+                  <Button key={s} disabled={busy} onClick={() => setClosing(s)}>
+                    {ACTION_LABEL[s] ?? s}
+                  </Button>
+                ))}
+                <Button disabled={busy} onClick={() => act(() => post(`/api/cases/${id}/contact`))}>
+                  Send reminder text only
+                </Button>
+              </div>
+            </details>
           </div>
         ) : (
           <div className="mt-5 flex items-center gap-3 border-t border-slate-100 pt-4 text-sm text-slate-600">
@@ -649,9 +660,7 @@ function CaseView() {
           {c.appointment && (
             <Card className="border-teal-200 bg-teal-50 p-5 text-sm">
               <h2 className="mb-1 font-semibold text-teal-900">Appointment</h2>
-              <p className="text-teal-900" dir="auto">
-                {c.appointment.label}
-              </p>
+              <p className="text-lg font-bold text-teal-900">{apptLabel(c.appointment)}</p>
               <p className="text-teal-800" dir="auto">
                 {c.appointment.clinic}
               </p>

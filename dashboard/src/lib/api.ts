@@ -26,7 +26,7 @@ export type Case = {
   attempts: number;
   ai_paused?: boolean;
   identity_confirmed: boolean;
-  appointment: { label: string; clinic: string; address: string; channel: string } | null;
+  appointment: { label: string; slot_iso?: string; clinic: string; address: string; channel: string } | null;
   escalation: { reason: string; summary: string; at: string; by: string } | null;
   callback_requested_at?: string | null;
   next_action_at: string | null;

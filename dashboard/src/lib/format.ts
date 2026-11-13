@@ -97,3 +97,11 @@ export function maskPhone(p: string): string {
 }
 
 export const isClosed = (s: string) => s.startsWith("closed_");
+
+/** Appointment time in English for staff, whatever language the patient uses. */
+export function apptLabel(a: { slot_iso?: string; label: string } | null | undefined): string {
+  if (!a) return "—";
+  if (!a.slot_iso) return a.label;
+  const d = new Date(a.slot_iso);
+  return d.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}

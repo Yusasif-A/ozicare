@@ -368,7 +368,12 @@ def test_demo_reset_fills_board_and_outreach_messages():
         res = await demo.reset(phone="+971500000099", name="Mariam Al Mansoori", lang="en")
         assert res["samples"] == len(demo.SAMPLES) and res["live_case"]
         statuses = {c["status"] async for c in db().cases.find({})}
-        assert {"escalated", "booked", "in_care", "closed_completed", "closed_lost", "new"} <= statuses
+        assert {"escalated", "booked", "in_care", "closed_completed", "closed_lost", "closed_declined", "new"} <= statuses
+        assert await db().messages.count_documents({}) > len(demo.SAMPLES)  # sample timelines are not empty
+        await demo.seed_if_empty()  # never adds to a database that has data
+        assert await db().cases.count_documents({}) == len(demo.SAMPLES) + len(demo.SCENARIOS)
+        # Only the chosen scenario is open on the presenter's phone.
+        assert await db().cases.count_documents({"phone": "+971500000099", "status": {"$in": list(cases.OPEN)}}) == 1
         live = await cases.get_case(res["live_case"])
         assert live["status"] == "new" and live["referral"]["facility_name"] and live["next_action_at"] is None
         assert (await scheduler.tick())["contacted"] == 0  # waits for the presenter's click
@@ -383,6 +388,23 @@ def test_demo_reset_fills_board_and_outreach_messages():
         d = await cases.get_case(res["live_case"])
         assert d["language"] == "ar" and d["pathway"] == "diabetes" and d["urgency"] == "soon"
         assert d["referral"]["service"] == "endocrinology" and "المختبر" in d["result_summary"]
+
+    run(go())
+
+
+def test_demo_autoseed_on_empty_database():
+    async def go():
+        from ozicare import demo
+
+        settings.app.demo_patient_phone = "+971500000098"
+        try:
+            await demo.seed_if_empty()
+        finally:
+            settings.app.demo_patient_phone = ""
+        assert await db().cases.count_documents({}) == len(demo.SAMPLES) + len(demo.SCENARIOS)
+        live = [c async for c in db().cases.find({"demo_live": True, "status": "new"})]
+        assert len(live) == 1 and live[0]["next_action_at"] is None  # ready for Notify, nothing sent
+        assert (await scheduler.tick())["contacted"] == 0
 
     run(go())
 

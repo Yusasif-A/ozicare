@@ -56,6 +56,8 @@ class AppSettings:
     # Demo: "Reset demo" on the board fills the board with sample cases and
     # makes one live case for this phone (the presenter's WhatsApp number).
     demo_patient_phone: str = field(default_factory=lambda: _env("DEMO_PATIENT_PHONE") or _env("BIMPEAI_DEMO_PHONE"))
+    # An empty database is filled with sample patients on start-up.
+    demo_autoseed: bool = field(default_factory=lambda: _env("DEMO_AUTOSEED", "true").lower() in {"1", "true", "yes"})
 
 
 @dataclass
