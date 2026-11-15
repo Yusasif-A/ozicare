@@ -421,19 +421,22 @@ def explanation(screening_type: str, lang: str, result_summary: str = "") -> str
 
 
 def knowledge_for_llm(screening_type: str, lang: str, result_summary: str, clinic: dict | None = None) -> str:
-    """Everything the LLM may draw on for one case, and nothing else."""
+    """What the LLM draws on for one case: approved wording plus general background."""
+    from .voice_tools import ABOUT
+
     s = screening(screening_type, lang)
     clinic = clinic or CLINIC[lang if lang in LANGS else "en"]
-    return "\n".join(
-        [
-            f"Screening: {s['name']}",
-            f"Approved explanation: {s['explain']}",
-            f"Case note approved for the patient: {result_summary or '(none)'}",
-            "Approved next steps: " + " | ".join(s["next_steps"]),
-            f"What to bring: {s['bring']}",
-            f"Emergency warning signs: {s['warning']}",
-            f"Clinic: {clinic['name']}, {clinic['address']}",
-            "General: screening results are not a diagnosis; a clinician confirms. "
-            "The follow-up visit is usually short. The patient can ask for a human at any time.",
-        ]
-    )
+    lines = [
+        f"Screening: {s['name']}",
+        f"Approved explanation: {s['explain']}",
+        f"Case note approved for the patient: {result_summary or '(none)'}",
+        "Approved next steps: " + " | ".join(s["next_steps"]),
+        f"What to bring: {s['bring']}",
+        f"Emergency warning signs: {s['warning']}",
+        f"Clinic: {clinic['name']}, {clinic['address']}",
+        "General: screening results are not a diagnosis; a clinician confirms. "
+        "The follow-up visit is usually short. The patient can ask for a human at any time.",
+    ]
+    if ABOUT.get(screening_type):
+        lines.append(f"Background (general, not about this patient): {ABOUT[screening_type]}")
+    return "\n".join(lines)

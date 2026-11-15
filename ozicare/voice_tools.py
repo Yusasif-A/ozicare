@@ -135,7 +135,7 @@ async def explain_result(call: dict) -> str:
     await _record(call, "explained")
     await cases.log_event(case["_id"], "ai", "explained", {"channel": "voice"})
     parts = [
-        "Explain this in your own warm, plain words, one or two sentences at a time, and check they follow. Do not add any medical facts beyond it. Never read numbers or lab values.",
+        "Explain this in your own warm, plain words, one or two sentences at a time, and check they follow. Never read numbers or lab values. Use the BACKGROUND at the end to answer their questions.",
         f"WHAT THE SCREENING FOUND: {s['explain']}",
     ]
     if case.get("result_summary"):
@@ -153,7 +153,52 @@ async def explain_result(call: dict) -> str:
         parts.append("THEN: offer to book the appointment now. If they agree, call get_available_slots.")
     parts.append(f"WHAT TO BRING: {s['bring']}")
     parts.append(f"WARNING SIGNS, mention once near the end: if they have {s['warning']}, go to emergency care straight away.")
+    about = ABOUT.get(case["screening_type"])
+    if about:
+        parts.append("BACKGROUND, for answering their questions in plain words (general information, not about them personally): " + about)
     return "\n".join(parts)
+
+
+# General, widely accepted background the agent may use to answer questions.
+# Never personal: no diagnosis, chances or prognosis, no medicines or doses.
+ABOUT = {
+    "cervical": (
+        "Cervical screening checks cells from the cervix, the neck of the womb, for changes, and tests for HPV, a very common virus "
+        "that most people get at some point and that usually clears by itself. Some types, such as HPV 16 and 18, can cause cell "
+        "changes that, over many years, could turn into cancer if left alone. Finding changes early is the point of screening: most "
+        "can be treated simply. High-grade changes mean the cells should be looked at more closely, not that there is cancer. "
+        "The next step is a colposcopy: a clinician looks at the cervix with a magnifying light, similar to a smear test, it takes "
+        "about 15 to 20 minutes, and a tiny sample may be taken. Most people find it uncomfortable rather than painful. They can "
+        "usually go back to normal activities the same day, can bring someone with them, and can ask for a female clinician. "
+        "If treatment is needed it is often done in the clinic. The clinician will explain their own results and options."
+    ),
+    "diabetes": (
+        "HbA1c is a blood test that shows the average blood sugar over the last two to three months. A raised result needs a repeat "
+        "or a second test to confirm it, and a clinician to review it. Many people feel completely well, which is why the follow-up "
+        "matters. The visit is usually a short consultation and a blood test; the clinic will say if they need to fast beforehand. "
+        "Raised blood sugar can often be improved with changes to food, activity and weight, and the care team can support that. "
+        "The clinician will explain their own results and what, if anything, needs to be done."
+    ),
+    "blood_pressure": (
+        "Blood pressure can be raised for a moment by stress, rushing or caffeine, so one reading is not a diagnosis. The follow-up "
+        "repeats the check, sometimes over several days or with a home monitor. Raised blood pressure usually has no symptoms, "
+        "which is why checks matter. The clinician will explain their own results and any next steps."
+    ),
+    "colorectal": (
+        "The FIT stool test looks for tiny amounts of blood that cannot be seen. Blood can come from many things, such as piles or "
+        "small growths called polyps; most people with a positive test do not have cancer. The usual next step is a colonoscopy, a "
+        "camera test of the bowel, done with sedation or pain relief, and the clinic gives instructions to prepare. Polyps can "
+        "often be removed during the test. The clinician will explain their own results."
+    ),
+    "breast": (
+        "Being called back after a mammogram is common, and most people called back do not have cancer. The next step may be more "
+        "images, an ultrasound, or a small sample with a needle, often at the same visit. The specialist will explain their own results."
+    ),
+    "obesity": (
+        "BMI compares weight and height. It is a starting point, not a diagnosis. A review checks related things like blood pressure "
+        "and blood sugar and offers support that fits the person's life."
+    ),
+}
 
 
 async def get_available_slots(call: dict) -> str:

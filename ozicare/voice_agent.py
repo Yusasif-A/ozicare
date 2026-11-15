@@ -54,13 +54,18 @@ BLOCKED_REPLACEMENT = {
 INSTRUCTIONS = """\
 You are the automated care assistant for {org}, a health screening programme, \
 on a WhatsApp voice call with a patient. You are an A I assistant and you say \
-so. You never claim to be a nurse or doctor.
+so. You never claim to be a nurse or doctor. You are warm, calm and patient.
 
-LANGUAGE: speak {language} for the whole call{switch_note}.
+LANGUAGE: speak {language} for the whole call. Do not change language because \
+of a word you did not catch or a noisy line. Only call switch_language if the \
+patient clearly asks, in words, to speak {other}.
 
 {who}
 
-HOW THE CALL GOES (always in this order; this is the post-screening follow-up)
+IF YOU DID NOT CATCH WHAT THEY SAID: say so kindly and ask them to repeat, in \
+{language}. Never guess, and never change language because of it.
+
+HOW THE CALL GOES (this is the post-screening follow-up)
 1. Greet them, say you are the automated assistant from {org}, and ask if you \
 are speaking with {first_name}. Say NOTHING about the screening until they confirm.
 2. Call confirm_identity with their answer.
@@ -72,17 +77,27 @@ and call book_slot with the number they choose. If already booked, confirm the \
 time still works.
 5. Prepare them: what to bring, and that a reminder comes the day before. \
 Mention the warning signs once.
-6. Ask if they have any questions. Answer only from what the tools told you; \
-anything else, call request_human.
+6. Ask if they have any questions, and answer them.
 7. Call end_call with a one-sentence summary and say goodbye.
+Steps are a guide, not a script: if they ask something at any point, answer it, \
+then carry on from where you were.
 
-NEVER say the patient has or does not have a disease. NEVER name a medicine or \
-dose or tell them to change treatment. NEVER tell them to skip follow-up. NEVER \
-ask for ID numbers, passwords or payment details.
+ANSWERING QUESTIONS: be genuinely helpful. You may explain, in plain general \
+terms, what the screening test is, what the result type usually means, what the \
+follow-up visit or test involves and how to prepare, why follow-up matters, and \
+anything about the appointment, the clinic or their referral. Use what the tools \
+told you first, and general, widely accepted health information for the rest.
+You may not: say they have or do not have a disease, give their personal \
+chances or a prognosis, name a medicine or dose, or tell them to change or stop \
+treatment. For those, say kindly that the clinician will go through it with them \
+at the visit, then keep helping. Call request_human only when they ask for a \
+person, or when they are worried and want to talk to someone now.
+
+NEVER tell them to skip follow-up. NEVER ask for ID numbers, passwords or \
+payment details.
 
 Emergency symptoms (chest pain, trouble breathing, fainting, heavy bleeding, \
 stroke signs, self-harm): call report_emergency immediately.
-They ask for a person, or ask something the tools do not answer: call request_human.
 They clearly refuse follow-up after hearing why it matters: call record_decline.
 
 This is a phone call: short sentences, one question at a time, no lists, no \
@@ -106,15 +121,15 @@ def _build_stt(lang: str, vad) -> object:
     code = "ar" if lang == "ar" else "en"
     if hasattr(elevenlabs, "STT"):
         # Realtime streams as the patient speaks; batch Scribe measured ~3.3s
-        # per Arabic utterance. The other language is secondary so a mid-call
-        # switch is still transcribed. Keyterms: batch Scribe heard "OziCare"
-        # as "Wally McIver" on the Arabic test clip.
+        # per Arabic utterance. Only the call's own language: a secondary
+        # language let a mumbled English word come back as Arabic, and the
+        # agent then switched language on its own. Keyterms: batch Scribe heard
+        # "OziCare" as "Wally McIver" on the Arabic test clip.
         return elevenlabs.STT(
             api_key=settings.eleven.api_key,
             model="scribe_v2_realtime",
             language_code=code,
-            secondary_languages=["en" if code == "ar" else "ar"],
-            keyterms=[settings.app.name, settings.app.org_name[:50]],
+            keyterms=[settings.app.name, settings.app.org_name[:50], "cervical", "colposcopy", "HbA1c", "Mariam"],
             # Without server VAD the plugin uses manual commits: a transcript is
             # only finalised when the turn times out, which added ~3s of dead
             # air to every reply on a live call. Let Scribe commit on silence.
@@ -155,7 +170,7 @@ class CareAgent(Agent):
             instructions = INSTRUCTIONS.format(
                 org=settings.app.org_name,
                 language=language,
-                switch_note=", unless the patient asks to switch between English and Arabic" ,
+                other="English" if lang == "ar" else "Arabic",
                 who=who,
                 first_name=cases.first_name(case["patient_name"]),
             )
@@ -254,18 +269,34 @@ class CareAgent(Agent):
         return await voice_tools.record_decline(await self._call(), reason)
 
     @function_tool()
-    async def switch_language(self, ctx: RunContext, language: str) -> str:
-        """Switch the call between English and Arabic when the patient asks.
+    async def switch_language(self, ctx: RunContext, language: str, patient_request: str) -> str:
+        """Switch the call between English and Arabic, ONLY when the patient
+        clearly asks in words to change language. Never because you could not
+        understand them.
 
         Args:
             language: "en" for English or "ar" for Arabic.
+            patient_request: The patient's exact words asking to switch.
         """
         lang = "ar" if language.lower().startswith("ar") else "en"
+        asked = (patient_request or "").lower()
+        if lang == self.lang:
+            return f"You are already speaking {'Arabic' if lang == 'ar' else 'English'}. Carry on."
+        asks_for = ("arab", "عرب", "english", "انجليزي", "إنجليزي", "الإنجليزية", "language", "لغة")
+        if not any(w in asked for w in asks_for):
+            return (
+                f"Do not switch. The patient did not ask to change language. Keep speaking "
+                f"{'Arabic' if self.lang == 'ar' else 'English'}, and if you did not understand them, ask them to repeat."
+            )
         self.lang = lang
         self.session.tts.update_options(voice_id=settings.eleven.voice_ar if lang == "ar" else settings.eleven.voice_en, language=lang)
+        # The recogniser has to listen for the new language too.
+        if hasattr(self.session.stt, "update_options"):
+            self.session.stt.update_options(secondary_languages=[lang])
         if self.case_id:
-            await cases.update_case(self.case_id, {"language": lang})
-            await cases.log_event(self.case_id, "patient", "language_changed", {"to": lang, "channel": "voice"})
+            # Logged, but the case keeps its language: WhatsApp messages and the
+            # booking confirmation stay in the language the patient chose.
+            await cases.log_event(self.case_id, "patient", "language_changed", {"to": lang, "channel": "voice", "words": patient_request[:120]})
         return f"Switched. Continue the call in {'Arabic' if lang == 'ar' else 'English'}."
 
     @function_tool()
