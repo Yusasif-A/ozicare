@@ -350,3 +350,4 @@ Hybrid model = **templates for critical paths** + LLM only for paraphrasing FAQs
 ---
 
 *Document version: 1.0 — for internal build / hackathon prototype*
+

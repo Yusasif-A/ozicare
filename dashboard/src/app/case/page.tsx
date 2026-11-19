@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
+import { AftercarePanel, CarePlanForm, EvidencePanel } from "@/components/Aftercare";
 import Shell from "@/components/Shell";
 import { Button, Card, ErrorNote, OverduePill, RiskPill, StatusPill, UrgencyPill, inputCls } from "@/components/ui";
 import { api, getUser, post, type CaseDetail, type Event, type Message, type Meta, type User } from "@/lib/api";
@@ -74,6 +75,34 @@ function eventText(ev: Event): string {
       return `Did not attend ${p.appointment ?? ""} (no-show #${p.count})`;
     case "fhir_ingested":
       return `Received from health record (FHIR) · ${p.findings}`;
+    case "care_plan":
+      return `Care plan recorded by ${p.by} · providers: ${(p.providers as string[] | undefined)?.join(", ")}`;
+    case "provider_requested":
+      return `Requested ${p.service} at ${p.facility}`;
+    case "provider_accepted":
+      return `${p.facility} accepted: ${p.service}`;
+    case "provider_chased":
+      return `⏱ ${p.facility} missed the deadline for ${p.service}: chased automatically`;
+    case "provider_notified":
+      return `Referral desk messaged on WhatsApp (${p.facility}${p.kind === "chase" ? ", reminder" : ", new request"})`;
+    case "provider_rerouted":
+      return `↪ ${p.service} re-routed from ${p.from} to ${p.to}${p.network_ok === false ? " (out of network)" : " (in network)"}`;
+    case "provider_escalated":
+      return `⚠ Provider delay escalated to coordinator: ${p.reason}`;
+    case "provider_done":
+      return `${p.service} done at ${p.facility}${p.result ? `: ${p.result}` : ""}`;
+    case "checkin_sent":
+      return `Recovery check-in sent${p.day ? ` (day ${p.day})` : ""}`;
+    case "checkin_done":
+      return `Check-in (${p.channel === "voice" ? "call" : "WhatsApp"}): feeling ${p.feeling}${p.warning_signs ? ` · ⚠ ${p.warning_signs}` : " · no warning signs"}`;
+    case "care_plan_explained":
+      return "AI went through the care plan on the call";
+    case "recovery_verified":
+      return `✓ Recovery verified: ${p.source}: ${p.result}`;
+    case "result_not_resolved":
+      return `Follow-up result not resolved: ${p.result}`;
+    case "signed_off":
+      return `✓ Signed off by ${p.by}: ${p.note}`;
     default:
       return ev.type.replaceAll("_", " ");
   }
@@ -92,6 +121,15 @@ const EVENT_TONE: Record<string, string> = {
   referral_declined: "text-red-700",
   risk_assessed: "text-indigo-700",
   consult_note: "text-indigo-700",
+  care_plan: "text-violet-700",
+  provider_chased: "text-amber-700",
+  provider_rerouted: "text-violet-700",
+  provider_escalated: "text-red-700",
+  provider_done: "text-emerald-700",
+  checkin_done: "text-teal-700",
+  recovery_verified: "text-emerald-700",
+  signed_off: "text-emerald-700",
+  result_not_resolved: "text-red-700",
 };
 
 // Older call turns were saved with the model's reasoning markup
@@ -292,6 +330,7 @@ function CaseView() {
   const [closeNote, setCloseNote] = useState("");
   const [note, setNote] = useState("");
   const [reply, setReply] = useState("");
+  const [demoNote, setDemoNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -337,7 +376,10 @@ function CaseView() {
     ...d.events.filter((e) => !QUIET_EVENTS.has(e.type)).map((e) => ({ kind: "event" as const, at: e.created_at, ev: e })),
   ].sort((a, b) => a.at.localeCompare(b.at));
 
-  const progress = d.allowed_transitions.filter((s) => !s.startsWith("closed_") && s !== "escalated" && !(c.status === "booked" && s === "in_care"));
+  const progress = d.allowed_transitions.filter(
+    (s) => !s.startsWith("closed_") && s !== "escalated" && !(c.status === "booked" && s === "in_care") && !(s === "follow_up" && !c.care_plan),
+  );
+  const recovery = c.status === "follow_up";
   const closes = d.allowed_transitions.filter((s) => s.startsWith("closed_"));
 
   return (
@@ -411,10 +453,14 @@ function CaseView() {
                 variant="primary"
                 className="px-4 py-2.5 text-[15px] shadow-md"
                 disabled={busy}
-                title="Sends the WhatsApp message with the patient page link and a 'Talk to us' call button; the patient calls when ready"
+                title={
+                  recovery
+                    ? "Sends the recovery check-in on WhatsApp (Feeling well / I have a concern) and the 'Talk to us' call button"
+                    : "Sends the WhatsApp message with the patient page link and a 'Talk to us' call button; the patient calls when ready"
+                }
                 onClick={() => act(() => post(`/api/cases/${id}/outreach?channel=invite`))}
               >
-                📲 {c.first_contact_at ? "Notify patient again" : "Notify patient"}
+                📲 {recovery ? "Send check-in" : c.first_contact_at ? "Notify patient again" : "Notify patient"}
               </Button>
               <Button
                 disabled={busy || !meta?.channels.whatsapp_call}
@@ -553,6 +599,46 @@ function CaseView() {
         </Card>
       )}
 
+      {c.status === "in_care" && !c.care_plan && <CarePlanForm caseId={id} busy={busy} act={act} />}
+      {c.care_plan && c.status === "follow_up" && getUser()?.role === "admin" && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-slate-300 bg-white/70 px-4 py-2.5 text-sm">
+          <span className="font-semibold text-slate-500">Demo · skip ahead in time:</span>
+          <Button
+            disabled={busy}
+            title="The first provider still waiting misses its deadline; the monitor runs (one escalation step per click)"
+            onClick={() =>
+              act(async () => {
+                const r = await post<{ service: string; facility: string; chased: number; rerouted: number; escalated: number }>("/api/demo/advance", { case_id: id, step: "delay" });
+                setDemoNote(
+                  `${r.facility} missed the deadline for ${r.service}: ${r.escalated ? "escalated to the coordinator" : r.rerouted ? "re-routed in network" : "chased automatically"}.`,
+                );
+              })
+            }
+          >
+            ⏩ Provider misses deadline
+          </Button>
+          <Button
+            disabled={busy}
+            title="The follow-up test result arrives from the lab as a FHIR Observation"
+            onClick={() =>
+              act(async () => {
+                await post("/api/demo/advance", { case_id: id, step: "result" });
+                setDemoNote("Follow-up result received over FHIR.");
+              })
+            }
+          >
+            ⏩ Follow-up result arrives
+          </Button>
+          {demoNote && <span className="text-xs text-slate-500">{demoNote}</span>}
+        </div>
+      )}
+      {c.care_plan && (
+        <div className="mb-4 grid gap-4 lg:grid-cols-[1fr_380px]">
+          <AftercarePanel c={c} busy={busy} act={act} closed={closed} />
+          <EvidencePanel c={c} ev={d.evidence} busy={busy} act={act} />
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
         {/* Timeline */}
         <Card className="flex flex-col">
@@ -593,6 +679,7 @@ function CaseView() {
 
         {/* Side panel */}
         <div className="space-y-4">
+          {!c.care_plan && (c.attended_at || closed) && <EvidencePanel c={c} ev={d.evidence} busy={busy} act={act} />}
           {(c.risk_findings?.length ?? 0) > 0 && (
             <Card className="p-5 text-sm">
               <h2 className="mb-2 font-semibold text-slate-900">Why this person was prioritised</h2>
@@ -650,7 +737,7 @@ function CaseView() {
                   <dd className="font-medium text-red-600">{c.no_show_count}</dd>
                 </>
               )}
-              {!closed && (
+              {!closed && c.sla_due_at && (
                 <>
                   <dt className="text-slate-500">SLA due</dt>
                   <dd className={c.overdue ? "font-medium text-red-600" : ""}>{when(c.sla_due_at)} ({ago(c.sla_due_at)})</dd>

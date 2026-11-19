@@ -377,7 +377,7 @@ def test_demo_reset_fills_board_and_outreach_messages():
         res = await demo.reset(phone="+971500000099", name="Mariam Al Mansoori", lang="en")
         assert res["samples"] == len(demo.SAMPLES) and res["live_case"]
         statuses = {c["status"] async for c in db().cases.find({})}
-        assert {"escalated", "booked", "in_care", "closed_completed", "closed_lost", "closed_declined", "new"} <= statuses
+        assert {"escalated", "booked", "follow_up", "closed_completed", "closed_lost", "closed_declined", "new"} <= statuses
         assert await db().messages.count_documents({}) > len(demo.SAMPLES)  # sample timelines are not empty
         await demo.seed_if_empty()  # never adds to a database that has data
         assert await db().cases.count_documents({}) == len(demo.SAMPLES) + len(demo.SCENARIOS)

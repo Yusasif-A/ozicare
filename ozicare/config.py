@@ -49,6 +49,10 @@ class AppSettings:
     ingest_api_key: str = field(default_factory=lambda: _env("INGEST_API_KEY"))
     # Where escalations are sent on WhatsApp, in addition to the dashboard.
     escalation_phone: str = field(default_factory=lambda: _env("ESCALATION_PHONE"))
+    # Referral desk that provider chases go to on WhatsApp, with a link to the
+    # provider page. A pilot keeps one desk number per facility (or uses FHIR
+    # Task updates only); the demo routes every facility to this one number.
+    provider_desk_phone: str = field(default_factory=lambda: _env("PROVIDER_DESK_PHONE"))
     # OziCare's own patient pages (the dashboard site). Messages link to
     # <this>/p?t=<token>. In a deployment behind a national health app the
     # same data is served over FHIR instead. Empty = no link in messages.

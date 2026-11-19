@@ -42,6 +42,7 @@ STEP_OF_STATUS = {
     "escalated": "referral",
     "booked": "booked",
     "in_care": "visit",
+    "follow_up": "visit",
     "closed_completed": "done",
 }
 

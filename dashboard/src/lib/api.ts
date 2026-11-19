@@ -50,7 +50,82 @@ export type Case = {
   next_action?: string;
   loss_risk: LossRisk;
   patient_link?: string;
+  care_plan?: CarePlan | null;
+  legs?: Leg[];
+  checkins?: Checkin[];
+  verification?: { at: string; source: string; facility: string; result: string; by: string } | null;
+  provider_alert?: { reason: string; at: string; leg: string; service: string; facility: string } | null;
+  signoff?: { by: string; role: string; at: string; note: string } | null;
 };
+
+export type CarePlan = { outcome: string; instructions: string[]; warning_signs: string[]; verify_text: string; by: string; at: string; pathway: string };
+
+export type LegAction = { at: string; level?: number; text: string };
+
+export type Leg = {
+  id: string;
+  key: string;
+  service: string;
+  label: string;
+  kind: "report" | "visit" | "result";
+  after: string | null;
+  verifies: boolean;
+  facility_name: string;
+  network_ok: boolean;
+  status: "waiting" | "requested" | "accepted" | "done";
+  requested_at: string | null;
+  due_at: string | null;
+  level: number;
+  actions: LegAction[];
+  done_at: string | null;
+  result: string;
+  normal: boolean | null;
+  token?: string;
+};
+
+export type Checkin = {
+  id: string;
+  day: number | null;
+  due_at: string;
+  status: "scheduled" | "sent" | "done" | "cancelled";
+  channel: string | null;
+  answers: { feeling: string; following_plan: boolean | null; warning_signs: string; notes: string } | null;
+  concern?: boolean;
+  done_at: string | null;
+};
+
+export type EvidenceItem = { key: string; label: string; ok: boolean; at: string | null; detail: string; required: boolean };
+export type Evidence = { items: EvidenceItem[]; missing: string[]; ready_to_close: boolean; complete: boolean };
+
+export type PlanTemplate = {
+  outcome: string;
+  instructions: string[];
+  warning_signs: string[];
+  legs: { key: string; service: string; kind: string; days: number; after?: string; verifies?: boolean; label: string }[];
+  checkins: number[];
+  verify_text: string;
+};
+
+export type ProviderRow = {
+  case_id: string;
+  patient_name: string;
+  urgency: string;
+  case_status: string;
+  id: string;
+  label: string;
+  facility_name: string;
+  kind: string;
+  status: string;
+  level: number;
+  hours_waiting: number;
+  due_at: string | null;
+  overdue: boolean;
+  blocked_by: string | null;
+  actions: LegAction[];
+  result?: string;
+};
+
+export type Notification = { id: string; type: string; tone: "danger" | "warn" | "info" | "ok"; case_id: string; patient_name: string; payload: Record<string, unknown>; at: string };
 
 export type Finding = { pathway: string; urgency: string; reason: string };
 
@@ -115,6 +190,7 @@ export type CaseDetail = {
   events: Event[];
   calls: Call[];
   allowed_transitions: string[];
+  evidence: Evidence;
 };
 
 export type Meta = {

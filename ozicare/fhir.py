@@ -261,6 +261,7 @@ TASK_STATUS = {
     "acknowledged": "accepted",
     "booked": "in-progress",
     "in_care": "in-progress",
+    "follow_up": "in-progress",
     "escalated": "on-hold",
     "closed_completed": "completed",
     "closed_declined": "rejected",
@@ -298,6 +299,7 @@ def capability() -> dict:
                 "resource": [
                     {"type": "Bundle", "interaction": [{"code": "create"}]},
                     {"type": "Encounter", "interaction": [{"code": "create"}]},
+                    {"type": "Observation", "interaction": [{"code": "create"}]},
                     {"type": "ServiceRequest", "interaction": [{"code": "read"}]},
                     {"type": "Appointment", "interaction": [{"code": "read"}]},
                     {"type": "Task", "interaction": [{"code": "read"}]},
@@ -346,4 +348,144 @@ def example_bundle(phone: str = "+971500000000", name: str = "Mariam Al Mansoori
             },
             {"resource": {"resourceType": "Coverage", "status": "active", "payor": [{"display": "Thiqa"}]}},
         ],
+    }
+
+
+# --------------------------------------------------------------------------
+# After the visit: follow-up results in, the evidence Bundle out
+# --------------------------------------------------------------------------
+
+
+async def apply_followup_result(obs: dict) -> dict:
+    """
+    Observation for a provider step: basedOn ServiceRequest/<step id> (as in
+    the evidence Bundle). interpretation N = normal; anything else is not
+    resolved and goes to a clinician.
+    """
+    from . import aftercare
+    from .db import db
+
+    if obs.get("resourceType") != "Observation":
+        raise FhirError("expected a FHIR Observation")
+    leg_id = ""
+    for b in obs.get("basedOn", []):
+        m = re.search(r"ServiceRequest/(LG-[0-9A-Fa-f]+)", b.get("reference", ""))
+        if m:
+            leg_id = m.group(1).upper()
+    if not leg_id:
+        raise FhirError("Observation.basedOn must reference ServiceRequest/<OziCare step id>")
+    case = await db().cases.find_one({"legs.id": leg_id})
+    if case is None:
+        raise FhirError(f"no provider step {leg_id}")
+    interp = [c for i in obs.get("interpretation", []) for c in _codes(i)]
+    normal = "N" in interp or "NEG" in interp
+    text = str(obs.get("valueString") or (obs.get("valueCodeableConcept") or {}).get("text") or (obs.get("code") or {}).get("text") or "").strip()
+    case = await aftercare.update_leg(case, leg_id, action="done", staff=None, result=text or "result received", normal=normal)
+    return {"case_id": case["_id"], "step": leg_id, "normal": normal, "verified": bool(case.get("verification"))}
+
+
+def evidence_bundle(case: dict) -> dict:
+    """Everything that proves the loop closed, as FHIR R4 resources."""
+    from . import aftercare
+
+    pat = _patient_ref(case)
+    entries: list[dict] = [service_request(case)]
+    for leg in case.get("legs") or []:
+        entries.append(
+            {
+                "resourceType": "ServiceRequest",
+                "id": leg["id"],
+                "status": "completed" if leg["status"] == "done" else ("on-hold" if leg["status"] == "waiting" else "active"),
+                "intent": "order",
+                "basedOn": [{"reference": f"ServiceRequest/{case['_id']}"}],
+                "code": {"text": leg["label"]},
+                "subject": pat,
+                "performer": [{"display": leg["facility_name"]}],
+                "authoredOn": _iso(leg.get("requested_at")),
+                "note": [{"text": a["text"], "time": _iso(a["at"])} for a in leg.get("actions", [])],
+            }
+        )
+    appt = appointment(case)
+    if appt:
+        entries.append(appt)
+    if case.get("attended_at"):
+        entries.append(
+            {
+                "resourceType": "Encounter",
+                "id": f"{case['_id']}-visit",
+                "status": "finished",
+                "class": {"code": "AMB"},
+                "subject": pat,
+                "basedOn": [{"reference": f"ServiceRequest/{case['_id']}"}],
+                "period": {"start": _iso(case["attended_at"])},
+                "serviceProvider": {"display": (case.get("appointment") or {}).get("clinic", "")},
+            }
+        )
+    cp = case.get("care_plan")
+    if cp:
+        entries.append(
+            {
+                "resourceType": "CarePlan",
+                "id": f"{case['_id']}-plan",
+                "status": "completed" if case["status"] == "closed_completed" else "active",
+                "intent": "plan",
+                "subject": pat,
+                "created": _iso(cp["at"]),
+                "author": {"display": cp["by"]},
+                "description": cp["outcome"],
+                "note": [{"text": s} for s in cp["instructions"]] + [{"text": f"Warning sign: {s}"} for s in cp["warning_signs"]],
+                "activity": [{"reference": {"reference": f"ServiceRequest/{leg['id']}"}} for leg in case.get("legs") or []],
+            }
+        )
+    for leg in case.get("legs") or []:
+        if leg["status"] == "done" and leg.get("result"):
+            entries.append(
+                {
+                    "resourceType": "Observation" if leg["kind"] == "result" else "DiagnosticReport",
+                    "id": f"{leg['id']}-result",
+                    "status": "final",
+                    "basedOn": [{"reference": f"ServiceRequest/{leg['id']}"}],
+                    "code": {"text": leg["label"]},
+                    "subject": pat,
+                    ("valueString" if leg["kind"] == "result" else "conclusion"): leg["result"],
+                    **({"interpretation": [{"coding": [{"code": "N" if leg["normal"] else "A"}]}]} if leg["kind"] == "result" else {}),
+                    "issued": _iso(leg.get("done_at")),
+                    "performer": [{"display": leg["facility_name"]}],
+                }
+            )
+    for ck in case.get("checkins") or []:
+        if ck.get("status") == "done":
+            a = ck.get("answers") or {}
+            entries.append(
+                {
+                    "resourceType": "Communication",
+                    "id": ck["id"],
+                    "status": "completed",
+                    "subject": pat,
+                    "medium": [{"text": ck.get("channel") or ""}],
+                    "sent": _iso(ck.get("done_at")),
+                    "payload": [{"contentString": f"Feeling: {a.get('feeling', '')}. Following plan: {a.get('following_plan')}. Warning signs: {a.get('warning_signs') or 'none'}."}],
+                }
+            )
+    entries.append(task(case))
+    so = case.get("signoff")
+    if so:
+        entries.append(
+            {
+                "resourceType": "Provenance",
+                "id": f"{case['_id']}-signoff",
+                "target": [{"reference": f"Task/{case['_id']}"}],
+                "recorded": _iso(so["at"]),
+                "activity": {"text": "Loop closed with evidence"},
+                "agent": [{"who": {"display": so["by"]}, "role": [{"text": so.get("role", "clinician")}]}],
+                "reason": [{"text": so["note"]}],
+            }
+        )
+    ev = aftercare.evidence(case)
+    return {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "identifier": {"system": OZICARE_SYSTEM, "value": f"{case['_id']}-evidence"},
+        "meta": {"tag": [{"code": "complete" if ev["complete"] else "incomplete", "display": "; ".join(ev["missing"]) or "all evidence on file"}]},
+        "entry": [{"fullUrl": f"{OZICARE_SYSTEM}/{r['resourceType']}/{r['id']}", "resource": r} for r in entries],
     }

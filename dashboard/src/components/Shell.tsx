@@ -3,10 +3,12 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, clearSession, getToken, getUser, post, type Meta, type User } from "@/lib/api";
+import { api, clearSession, getToken, getUser, post, type Meta, type Notification, type User } from "@/lib/api";
+import { ago } from "@/lib/format";
 
 const NAV = [
   { href: "/board", label: "Case board", icon: "▦", match: (p: string) => p.startsWith("/board") || p.startsWith("/case") && !p.startsWith("/cases") },
+  { href: "/providers", label: "Referral monitor", icon: "⇄", match: (p: string) => p.startsWith("/providers") },
   { href: "/cases/new", label: "New result", icon: "+", match: (p: string) => p.startsWith("/cases/new") },
   { href: "/metrics", label: "Loop metrics", icon: "◔", match: (p: string) => p.startsWith("/metrics") },
 ];
@@ -107,6 +109,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             ))}
           </nav>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            <Bell />
             {ch && (
               <div className="hidden items-center gap-1.5 lg:flex">
                 <Chip ok={ch.whatsapp} label="WhatsApp" />
@@ -158,5 +161,86 @@ function Chip({ ok, label }: { ok: boolean; label: string }) {
       <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-slate-400"}`} />
       {label}
     </span>
+  );
+}
+
+const NOTE_TONE: Record<string, string> = {
+  danger: "bg-red-500",
+  warn: "bg-violet-500",
+  info: "bg-sky-400",
+  ok: "bg-emerald-500",
+};
+
+function noteText(n: Notification): string {
+  const p = n.payload as Record<string, string | boolean | undefined>;
+  switch (n.type) {
+    case "provider_escalated":
+      return `Provider delay: ${p.reason}`;
+    case "escalated":
+      return `Escalated: ${p.reason}`;
+    case "provider_rerouted":
+      return `${p.service} re-routed from ${p.from} to ${p.to}`;
+    case "provider_chased":
+      return `${p.facility} chased for ${p.service}`;
+    case "checkin_done":
+      return p.warning_signs ? `Check-in concern: ${p.warning_signs}` : `Check-in: feeling ${p.feeling}`;
+    case "provider_done":
+      return `${p.service} done${p.result ? `: ${p.result}` : ""}`;
+    case "recovery_verified":
+      return `Recovery verified: ${p.result}`;
+    case "signed_off":
+      return `Loop closed with evidence by ${p.by}`;
+    default:
+      return n.type.replaceAll("_", " ");
+  }
+}
+
+/** Staff alerts: escalations, provider delays, check-in concerns, verified recoveries. */
+function Bell() {
+  const [data, setData] = useState<{ rows: Notification[]; unread: number } | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const load = () => api<{ rows: Notification[]; unread: number }>("/api/notifications").then(setData).catch(() => {});
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+  const unread = data?.unread ?? 0;
+  return (
+    <div className="relative">
+      <button
+        aria-label="Notifications"
+        onClick={() => {
+          setOpen(!open);
+          if (!open && unread) post("/api/notifications/seen").then(() => setData((d) => (d ? { ...d, unread: 0 } : d))).catch(() => {});
+        }}
+        className="relative grid h-9 w-9 place-items-center rounded-lg text-lg text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+      >
+        🔔
+        {unread > 0 && (
+          <span className="absolute -right-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-red-600 px-1 text-[11px] font-bold text-white">{unread > 9 ? "9+" : unread}</span>
+        )}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-11 z-30 w-[22rem] max-w-[90vw] rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="border-b border-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-900">Alerts</div>
+          <ul className="max-h-[60vh] overflow-y-auto">
+            {(data?.rows ?? []).map((n) => (
+              <li key={n.id}>
+                <Link href={`/case?id=${n.case_id}`} onClick={() => setOpen(false)} className="flex gap-3 px-4 py-2.5 hover:bg-slate-50">
+                  <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${NOTE_TONE[n.tone]}`} />
+                  <span className="min-w-0 text-sm">
+                    <span className="block font-semibold text-slate-900">{n.patient_name}</span>
+                    <span className="block text-slate-600">{noteText(n)}</span>
+                    <span className="block text-xs text-slate-400">{ago(n.at)}</span>
+                  </span>
+                </Link>
+              </li>
+            ))}
+            {data && data.rows.length === 0 && <li className="px-4 py-6 text-center text-sm text-slate-400">No alerts</li>}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }

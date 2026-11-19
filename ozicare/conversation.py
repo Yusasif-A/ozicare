@@ -239,6 +239,11 @@ async def handle_inbound(msg: dict) -> None:
         await _identity_step(case, text, intent)
         return
 
+    # After the visit: check-in answers.
+    if case.get("conv_state") in ("await_checkin", "await_concern") or msg.get("button_id") in ("ck_ok", "ck_concern"):
+        if await _checkin_step(case, text, norm, msg.get("button_id")):
+            return
+
     # Slot selection.
     if case.get("conv_state") == "await_slot":
         chosen = _chosen_slot(case, norm, msg.get("button_id"))
@@ -252,6 +257,42 @@ async def handle_inbound(msg: dict) -> None:
         return
 
     await _run_intent(case, intent, text)
+
+
+CHECKIN_REPLY = {
+    "ok": {
+        "en": "Thank you, {first}. Glad you are feeling well. Keep following your care plan, and message us any time.",
+        "ar": "شكراً يا {first}. يسعدنا أنك بخير. استمري في اتباع خطة رعايتك، وراسلينا في أي وقت.",
+    },
+    "ask": {
+        "en": "I'm sorry to hear that. Please tell me in a few words what is worrying you.",
+        "ar": "يؤسفني سماع ذلك. أخبريني باختصار ما الذي يقلقك.",
+    },
+    "concern": {
+        "en": "Thank you for telling us. A clinician from your care team will contact you today. If it gets worse, go to the nearest emergency department.",
+        "ar": "شكراً لإخبارنا. سيتواصل معك طبيب من فريق رعايتك اليوم. إذا ساءت حالتك، توجهي إلى أقرب قسم طوارئ.",
+    },
+}
+
+
+async def _checkin_step(case: dict, text: str, norm: str, button_id: str | None) -> bool:
+    from . import aftercare
+
+    lang = case["language"]
+    first = cases.first_name(case["patient_name"])
+    if case.get("conv_state") == "await_concern" and text.strip() and button_id is None:
+        await aftercare.record_checkin(case, channel="whatsapp", feeling="concern", following_plan=None, warning_signs=text)
+        await say(case, CHECKIN_REPLY["concern"][lang], meta={"kind": "checkin_concern"})
+        return True
+    if button_id == "ck_ok" or (button_id is None and (norm == "1" or _YES.match(norm))):
+        await aftercare.record_checkin(case, channel="whatsapp", feeling="well", following_plan=True)
+        await say(case, CHECKIN_REPLY["ok"][lang].format(first=first), meta={"kind": "checkin_ok"})
+        return True
+    if button_id == "ck_concern" or norm == "2":
+        await cases.update_case(case["_id"], {"conv_state": "await_concern"})
+        await say(case, CHECKIN_REPLY["ask"][lang], meta={"kind": "checkin_ask"})
+        return True
+    return False
 
 
 async def _set_language(case: dict, lang: str) -> dict:

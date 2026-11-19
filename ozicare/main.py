@@ -26,7 +26,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import auth, bimpe, cases, content, conversation, demo, fhir, patient_app, referrals, risk, scheduler, voice_tools, wa_calls, whatsapp
+from . import aftercare, auth, bimpe, cases, content, conversation, demo, fhir, patient_app, referrals, risk, scheduler, voice_tools, wa_calls, whatsapp
 from .config import settings
 from .db import close, db, ensure_indexes, now
 
@@ -73,6 +73,7 @@ app.include_router(patient_app.router)
 Staff = Annotated[dict, Depends(auth.require("viewer"))]
 Navigator = Annotated[dict, Depends(auth.require("navigator"))]
 Admin = Annotated[dict, Depends(auth.require("admin"))]
+Clinician = Annotated[dict, Depends(auth.require("clinician"))]
 
 
 def _iso(doc: dict) -> dict:
@@ -267,7 +268,15 @@ async def case_detail(case_id: str, _: Staff) -> dict:
     messages = [_iso(m) async for m in db().messages.find({"case_id": case_id}).sort("created_at", 1)]
     events = [_iso(e) async for e in db().events.find({"case_id": case_id}).sort("created_at", 1)]
     calls = [_iso({k: v for k, v in c.items() if k != "transcript"}) async for c in db().calls.find({"case_id": case_id}).sort("started_at", -1)]
-    return {"case": cases.public(case), "patient": _iso(patient or {}), "messages": messages, "events": events, "calls": calls, "allowed_transitions": sorted(cases.TRANSITIONS.get(case["status"], []))}
+    return {
+        "case": cases.public(case),
+        "patient": _iso(patient or {}),
+        "messages": messages,
+        "events": events,
+        "calls": calls,
+        "allowed_transitions": sorted(cases.TRANSITIONS.get(case["status"], [])),
+        "evidence": aftercare.evidence(case),
+    }
 
 
 class StatusChange(BaseModel):
@@ -280,6 +289,16 @@ async def change_status(case_id: str, body: StatusChange, user: Navigator) -> di
     case = await _case_or_404(case_id)
     if body.status in cases.CLOSED and not body.note.strip():
         raise HTTPException(400, "closing a case needs a note: what is the evidence?")
+    if body.status == "closed_completed":
+        # Completed means proven: the clinician signs off once the evidence is in.
+        if auth.ROLES.index(user["role"]) < auth.ROLES.index("clinician"):
+            raise HTTPException(403, "a clinician signs off a completed case")
+        try:
+            case = await aftercare.sign_off(case, staff=user, note=body.note)
+        except cases.TransitionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        await conversation.say(case, content.t("closed_thanks", case["language"], first_name=cases.first_name(case["patient_name"])), meta={"kind": "closed"}, actor="system")
+        return cases.public(case)
     try:
         case = await cases.transition(case_id, body.status, actor="staff", actor_id=user["_id"], note=body.note)
     except cases.TransitionError as exc:
@@ -434,6 +453,207 @@ async def attendance(case_id: str, body: Attendance, user: Navigator) -> dict:
     if body.attended:
         await conversation.say(case, content.t("attended_thanks", case["language"], first_name=cases.first_name(case["patient_name"])), meta={"kind": "attended"})
     return cases.public(case)
+
+
+# --------------------------------------------------------------------------
+# After the visit: care plan, providers, check-ins, evidence
+# --------------------------------------------------------------------------
+
+
+@app.get("/api/cases/{case_id}/care-plan/template")
+async def care_plan_template(case_id: str, _: Staff) -> dict:
+    return aftercare.template(await _case_or_404(case_id))
+
+
+class CarePlanIn(BaseModel):
+    outcome: str = ""
+    instructions: list[str] = []
+    warning_signs: list[str] = []
+    legs: list[str] | None = None
+    checkins: list[int] = []
+
+
+@app.post("/api/cases/{case_id}/care-plan")
+async def save_care_plan(case_id: str, body: CarePlanIn, user: Clinician) -> dict:
+    """The clinician records the visit outcome and the plan: in_care -> follow_up."""
+    case = await _case_or_404(case_id)
+    try:
+        return cases.public(await aftercare.save_plan(case, body.model_dump(), staff=user))
+    except cases.TransitionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class LegUpdate(BaseModel):
+    action: str
+    note: str = ""
+    result: str = ""
+    normal: bool | None = None
+
+
+@app.post("/api/cases/{case_id}/legs/{leg_id}")
+async def update_leg(case_id: str, leg_id: str, body: LegUpdate, user: Navigator) -> dict:
+    """A provider step: accepted, or done (report in, visit attended, result back)."""
+    case = await _case_or_404(case_id)
+    try:
+        return cases.public(await aftercare.update_leg(case, leg_id, action=body.action, staff=user, note=body.note, result=body.result, normal=body.normal))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/cases/{case_id}/checkin")
+async def send_checkin(case_id: str, user: Navigator) -> dict:
+    """Send the next check-in now: WhatsApp buttons plus the call button."""
+    case = await _case_or_404(case_id)
+    if case["status"] != "follow_up":
+        raise HTTPException(409, "check-ins start once the care plan is recorded")
+    await aftercare.send_checkin(case)
+    await cases.log_event(case_id, "staff", "outreach", {"channel": "checkin"}, user["_id"])
+    return cases.public(await cases.get_case(case_id))
+
+
+@app.get("/api/cases/{case_id}/evidence")
+async def case_evidence(case_id: str, _: Staff) -> dict:
+    return aftercare.evidence(await _case_or_404(case_id))
+
+
+@app.get("/api/providers")
+async def provider_monitor(_: Staff) -> dict:
+    """Every provider step across open cases, latest escalation first."""
+    rows = []
+    ts = now()
+    async for c in db().cases.find({"status": {"$in": list(cases.OPEN)}, "$or": [{"legs.0": {"$exists": True}}, {"referral.status": "sent"}]}):
+        base = {"case_id": c["_id"], "patient_name": c["patient_name"], "urgency": c["urgency"], "case_status": c["status"]}
+        ref = c.get("referral") or {}
+        waited = (ts - ref["sent_at"]).total_seconds() / 3600 if ref.get("sent_at") else 0
+        # A first referral shows here once it has waited two days for acceptance.
+        if ref.get("status") == "sent" and waited >= 48:
+            rows.append({**base, "id": ref["id"], "label": ref.get("service_label"), "facility_name": ref.get("facility_name"), "kind": "referral", "status": "requested", "level": 0, "hours_waiting": round(waited, 1), "due_at": None, "overdue": False, "blocked_by": None, "actions": []})
+        legs = c.get("legs") or []
+        for leg in legs:
+            start = leg.get("requested_at")
+            waited = (ts - start).total_seconds() / 3600 if start and leg["status"] != "done" else 0
+            dep = next((x for x in legs if x["key"] == leg.get("after")), None)
+            rows.append(
+                {
+                    **base,
+                    **{k: leg.get(k) for k in ("id", "label", "facility_name", "kind", "status", "level", "network_ok", "result", "normal")},
+                    "hours_waiting": round(waited, 1),
+                    "due_at": leg["due_at"].isoformat() if leg.get("due_at") else None,
+                    "overdue": bool(leg.get("due_at") and leg["due_at"] < ts),
+                    "blocked_by": f"{dep['label']} ({dep['facility_name']})" if dep and leg["status"] == "waiting" and dep["status"] != "done" else None,
+                    "actions": [_iso(a) for a in leg.get("actions", [])],
+                }
+            )
+    rows.sort(key=lambda r: (r["status"] == "done", -(r["level"] or 0), not r["overdue"], -(r["hours_waiting"] or 0)))
+    counts = {
+        "open": sum(r["status"] != "done" for r in rows),
+        "chased": sum(r["level"] == 1 and r["status"] != "done" for r in rows),
+        "rerouted": sum(r["level"] == 2 and r["status"] != "done" for r in rows),
+        "escalated": sum(r["level"] == 3 and r["status"] != "done" for r in rows),
+        "blocked": sum(bool(r["blocked_by"]) for r in rows),
+    }
+    return {"rows": rows, "counts": counts}
+
+
+# Provider page: the facility updates its one step through the link in the
+# desk message. No login; the token opens that step only, with initials.
+
+
+async def _leg_by_token(token: str) -> tuple[dict, dict]:
+    if len(token) < 12:
+        raise HTTPException(404, "link not recognised")
+    case = await db().cases.find_one({"legs.token": token})
+    if case is None:
+        raise HTTPException(404, "link not recognised or expired")
+    return case, next(x for x in case["legs"] if x.get("token") == token)
+
+
+def _provider_view(case: dict, leg: dict) -> dict:
+    return {
+        "case_id": case["_id"],
+        "patient": aftercare._initials(case["patient_name"]),
+        "urgency": case["urgency"],
+        "reason": "; ".join(f["reason"] for f in case.get("risk_findings", [])),
+        "care_plan": (case.get("care_plan") or {}).get("outcome", ""),
+        "referred_by": (case.get("care_plan") or {}).get("by", ""),
+        **{k: leg.get(k) for k in ("label", "kind", "status", "level", "facility_name", "result", "normal")},
+        "requested_at": _iso({"t": leg.get("requested_at")})["t"],
+        "due_at": _iso({"t": leg.get("due_at")})["t"],
+        "actions": [_iso(a) for a in leg.get("actions", [])],
+    }
+
+
+@app.get("/api/provider/{token}")
+async def provider_get(token: str) -> dict:
+    case, leg = await _leg_by_token(token)
+    return _provider_view(case, leg)
+
+
+class ProviderUpdate(BaseModel):
+    action: str  # accept | done
+    result: str = ""
+    normal: bool | None = None
+
+
+@app.post("/api/provider/{token}")
+async def provider_post(token: str, body: ProviderUpdate) -> dict:
+    case, leg = await _leg_by_token(token)
+    try:
+        case = await aftercare.update_leg(case, leg["id"], action=body.action, staff=None, result=body.result, normal=body.normal, by=leg["facility_name"])
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _provider_view(case, next(x for x in case["legs"] if x["id"] == leg["id"]))
+
+
+# Staff notifications: the bell in the dashboard.
+NOTIFY = {
+    "provider_escalated": "danger",
+    "escalated": "danger",
+    "provider_rerouted": "warn",
+    "provider_chased": "info",
+    "checkin_done": "info",
+    "provider_done": "ok",
+    "recovery_verified": "ok",
+    "signed_off": "ok",
+}
+
+
+@app.get("/api/notifications")
+async def notifications(user: Staff) -> dict:
+    from datetime import timedelta
+
+    since = now() - timedelta(days=14)
+    rows = []
+    names: dict[str, str] = {}
+    async for e in db().events.find({"type": {"$in": list(NOTIFY)}, "created_at": {"$gte": since}}).sort("created_at", -1).limit(40):
+        if e["case_id"] not in names:
+            c = await db().cases.find_one({"_id": e["case_id"]}, {"patient_name": 1})
+            names[e["case_id"]] = (c or {}).get("patient_name", "")
+        rows.append({"id": str(e["_id"]), "type": e["type"], "tone": NOTIFY[e["type"]], "case_id": e["case_id"], "patient_name": names[e["case_id"]], "payload": _iso(e.get("payload") or {}), "at": e["created_at"].isoformat()})
+    seen = user.get("notif_seen_at")
+    unread = sum(1 for r in rows if not seen or r["at"] > seen.isoformat())
+    return {"rows": rows, "unread": unread}
+
+
+@app.post("/api/notifications/seen")
+async def notifications_seen(user: Staff) -> dict:
+    await db().staff_users.update_one({"_id": user["_id"]}, {"$set": {"notif_seen_at": now()}})
+    return {"ok": True}
+
+
+class DemoAdvance(BaseModel):
+    case_id: str
+    step: str  # delay | result
+
+
+@app.post("/api/demo/advance")
+async def demo_advance(body: DemoAdvance, _: Admin) -> dict:
+    """Demo only: skip ahead in time instead of waiting days."""
+    case = await _case_or_404(body.case_id)
+    try:
+        return await demo.advance(case, body.step)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 class ReferralResponse(BaseModel):
@@ -680,6 +900,17 @@ async def fhir_encounter(request: Request, authorization: Annotated[str | None, 
     return Response(json.dumps(result), media_type="application/json")
 
 
+@app.post("/fhir/Observation", tags=["fhir"])
+async def fhir_observation(request: Request, authorization: Annotated[str | None, Header()] = None) -> Response:
+    """A follow-up result from a lab or clinic for a provider step: basedOn ServiceRequest/(case id)-(step id)."""
+    _ingest_key(authorization)
+    try:
+        result = await fhir.apply_followup_result(await request.json())
+    except ValueError as exc:
+        return _outcome(409, str(exc))
+    return Response(json.dumps(result), media_type="application/json")
+
+
 async def _fhir_case(case_id: str, authorization: str | None) -> dict:
     # Facilities use the ingest key; staff can read with their login token.
     if authorization != f"Bearer {settings.app.ingest_api_key}" or not settings.app.ingest_api_key:
@@ -770,3 +1001,9 @@ async def health() -> dict:
     except Exception as exc:  # noqa: BLE001
         mongo = f"error: {exc}"[:200]
     return {"ok": mongo == "ok", "mongo": mongo, "whatsapp": settings.whatsapp.configured, "bimpe": settings.bimpe.configured, "livekit": settings.livekit.configured}
+
+
+@app.get("/fhir/Bundle/{case_id}/evidence", tags=["fhir"])
+async def fhir_evidence(case_id: str, authorization: Annotated[str | None, Header()] = None) -> Response:
+    """The loop's clinical evidence as one FHIR Bundle, for the shared record."""
+    return _fhir(fhir.evidence_bundle(await _fhir_case(case_id, authorization)))

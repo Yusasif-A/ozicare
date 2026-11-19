@@ -271,6 +271,58 @@ async def record_decline(call: dict, reason: str) -> str:
     return "Recorded. Tell them you respect their choice and they can message or call back any time if they change their mind. Then end the call."
 
 
+async def get_care_plan(call: dict) -> str:
+    """The check-in call: the plan the clinician wrote, and where each provider step is."""
+    case = await _case_for(call)
+    gate = _gate(call, case)
+    if gate:
+        return gate
+    cp = case.get("care_plan")
+    if not cp:
+        return "No care plan has been recorded yet. Say the care team will send it after the visit, ask if they have questions, then end the call."
+    from . import aftercare
+    from .referrals import SERVICES
+
+    lang = case["language"]
+    pw = cp.get("pathway", "general")
+    ins = [aftercare._ar_for(pw, "instructions", s) if lang == "ar" else s for s in cp["instructions"]]
+    warn = [aftercare._ar_for(pw, "warning_signs", s) if lang == "ar" else s for s in cp["warning_signs"]]
+    states = {"waiting": "will be arranged after the earlier step", "requested": "requested, we are arranging it", "accepted": "confirmed by the provider", "done": "done"}
+    steps = []
+    for leg in case.get("legs") or []:
+        svc = SERVICES[leg["service"]][1 if lang == "ar" else 0]
+        state = states[leg["status"]]
+        if leg.get("level") == 2 and leg["status"] != "done":
+            state += f" (moved to {leg['facility_name']} to avoid a delay)"
+        steps.append(f"{svc}: {state}")
+    await _record(call, "care_plan_explained")
+    await cases.log_event(case["_id"], "ai", "care_plan_explained", {"channel": "voice"})
+    return "\n".join(
+        [
+            "Remind them of their plan in your own warm, plain words, one piece at a time. Do not add medical facts.",
+            f"WHAT WAS DONE AT THE VISIT: {cp['outcome']}",
+            "WHAT TO DO NOW: " + " ".join(ins),
+            "WHAT WE ARE ARRANGING NEXT: " + "; ".join(steps),
+            "WARNING SIGNS TO ASK ABOUT, ONE AT A TIME: " + "; ".join(warn),
+            "Then ask how they feel, whether they have been able to follow the plan, and about the warning signs, and call record_checkin.",
+        ]
+    )
+
+
+async def record_checkin(call: dict, feeling: str, following_plan: bool, warning_signs: str = "", notes: str = "") -> str:
+    case = await _case_for(call)
+    gate = _gate(call, case)
+    if gate:
+        return gate
+    from . import aftercare
+
+    await aftercare.record_checkin(case, channel="voice", feeling=feeling, following_plan=following_plan, warning_signs=warning_signs, notes=notes)
+    await _record(call, "checkin_recorded")
+    if warning_signs.strip():
+        return "Recorded and a clinician has been alerted. Tell them a clinician from their care team will call them today, and if it gets worse to go to the nearest emergency department. Then ask if they have questions."
+    return "Recorded. Thank them, tell them what happens next from the plan, and ask if they have any questions."
+
+
 async def end_call(call: dict, summary: str = "") -> str:
     await db().calls.update_one({"_id": call["_id"]}, {"$set": {"status": "ended", "ended_at": now(), "agent_summary": summary}})
     if call.get("case_id"):
@@ -393,3 +445,20 @@ async def http_decline(body: ReasonBody) -> dict:
 @router.post("/end_call", dependencies=_dep)
 async def http_end(body: SummaryBody = SummaryBody()) -> dict:
     return {"result": await end_call(await resolve_call(body.session_id), body.summary)}
+
+
+class CheckinBody(SessionBody):
+    feeling: str = Field(description="How they feel, in a few words.")
+    following_plan: bool = Field(description="True if they have been able to follow the care plan.")
+    warning_signs: str = Field(default="", description="Any warning signs they report; empty if none.")
+    notes: str = Field(default="", description="Anything else they said that the care team should know.")
+
+
+@router.post("/get_care_plan", dependencies=_dep)
+async def http_care_plan(body: SessionBody = SessionBody()) -> dict:
+    return {"result": await get_care_plan(await resolve_call(body.session_id))}
+
+
+@router.post("/record_checkin", dependencies=_dep)
+async def http_checkin(body: CheckinBody) -> dict:
+    return {"result": await record_checkin(await resolve_call(body.session_id), body.feeling, body.following_plan, body.warning_signs, body.notes)}

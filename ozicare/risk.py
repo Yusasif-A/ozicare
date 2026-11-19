@@ -146,7 +146,7 @@ def loss_risk(case: dict) -> dict:
     reasons. Simple and explainable on purpose: staff act on the reasons.
     """
     status = case.get("status", "")
-    if status.startswith("closed") or status == "in_care":
+    if status.startswith("closed") or status in ("in_care", "follow_up"):
         return {"score": 0, "level": "none", "reasons": []}
     score, reasons = 0, []
 

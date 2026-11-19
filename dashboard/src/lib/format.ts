@@ -4,6 +4,7 @@ export const STATUS_LABEL: Record<string, string> = {
   acknowledged: "Acknowledged",
   booked: "Booked",
   in_care: "In care",
+  follow_up: "Recovery",
   escalated: "Escalated",
   closed_completed: "Closed · completed",
   closed_declined: "Closed · declined",
@@ -17,6 +18,7 @@ export const STATUS_STYLE: Record<string, string> = {
   acknowledged: "bg-indigo-50 text-indigo-700 ring-indigo-200",
   booked: "bg-teal-50 text-teal-700 ring-teal-200",
   in_care: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  follow_up: "bg-violet-50 text-violet-700 ring-violet-200",
   escalated: "bg-orange-50 text-orange-700 ring-orange-300",
   closed_completed: "bg-emerald-600 text-white ring-emerald-600",
   closed_declined: "bg-slate-200 text-slate-700 ring-slate-300",
@@ -71,12 +73,22 @@ export const ACTION_LABEL: Record<string, string> = {
   acknowledged: "Mark acknowledged",
   booked: "Mark booked",
   in_care: "Mark attended / in care",
+  follow_up: "Back to recovery",
   escalated: "Escalate",
   closed_completed: "Close · completed",
   closed_declined: "Close · declined",
   closed_lost: "Close · lost to follow-up",
   closed_transferred: "Close · transferred",
 };
+
+export const LEVEL_LABEL = ["On track", "Chased", "Re-routed", "Escalated"];
+export const LEVEL_STYLE = [
+  "bg-slate-100 text-slate-600 ring-slate-200",
+  "bg-amber-50 text-amber-800 ring-amber-300",
+  "bg-violet-50 text-violet-700 ring-violet-300",
+  "bg-red-600 text-white ring-red-600",
+];
+export const LEG_STATUS: Record<string, string> = { waiting: "Waiting on earlier step", requested: "Requested", accepted: "Accepted", done: "Done" };
 
 export function ago(iso: string | null | undefined): string {
   if (!iso) return "—";

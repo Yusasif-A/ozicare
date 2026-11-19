@@ -11,7 +11,8 @@ Per due case:
   contacted, attempts used up -> closed_lost (still reportable)
   acknowledged, not booked    -> reminder, then left overdue for staff
   booked, reminder due        -> appointment reminder
-and for every open case, `overdue` is set once `sla_due_at` passes.
+and for every open case, `overdue` is set once `sla_due_at` passes. After the
+visit, aftercare.monitor() escalates late providers and due check-ins go out.
 """
 
 from __future__ import annotations
@@ -48,6 +49,12 @@ async def tick() -> dict:
         except Exception:  # noqa: BLE001 - one bad case must not stall the rest
             logger.exception("Scheduler failed on %s", case["_id"])
             await db().cases.update_one({"_id": case["_id"]}, {"$set": {"next_action_at": now() + timedelta(minutes=5)}})
+
+    # After the visit: provider deadlines and recovery check-ins.
+    from . import aftercare
+
+    stats["providers"] = await aftercare.monitor()
+    stats["checkins"] = await aftercare.due_checkins()
     return stats
 
 

@@ -25,7 +25,7 @@ from .db import db, new_id, now
 
 logger = logging.getLogger("ozicare.cases")
 
-OPEN = ("new", "contacted", "acknowledged", "booked", "in_care", "escalated")
+OPEN = ("new", "contacted", "acknowledged", "booked", "in_care", "follow_up", "escalated")
 CLOSED = ("closed_completed", "closed_declined", "closed_lost", "closed_transferred")
 STATUSES = OPEN + CLOSED
 URGENCIES = ("routine", "soon", "urgent")
@@ -41,8 +41,11 @@ TRANSITIONS: dict[str, set[str]] = {
     "contacted": {"acknowledged", "booked", "escalated", *CLOSED},
     "acknowledged": {"booked", "escalated", *CLOSED},
     "booked": {"in_care", "acknowledged", "escalated", *CLOSED},
-    "in_care": {"escalated", *CLOSED},
-    "escalated": {"contacted", "acknowledged", "booked", "in_care", *CLOSED},
+    # in_care -> follow_up when the clinician records the care plan; closing as
+    # completed from there needs the evidence (aftercare.sign_off).
+    "in_care": {"follow_up", "escalated", *CLOSED},
+    "follow_up": {"escalated", *CLOSED},
+    "escalated": {"contacted", "acknowledged", "booked", "in_care", "follow_up", *CLOSED},
     # Closed is terminal for the system; staff can reopen (see reopen()).
     **{c: set() for c in CLOSED},
 }
@@ -334,7 +337,7 @@ async def transition(
     if to in ("contacted", "acknowledged"):
         fields.setdefault("sla_due_at", ts + ack_window(case["urgency"]))
         fields["overdue"] = False
-    if to in ("booked", "in_care", "escalated"):
+    if to in ("booked", "in_care", "follow_up", "escalated"):
         fields["overdue"] = False
 
     updated = await update_case(case_id, fields)

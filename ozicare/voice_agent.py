@@ -104,6 +104,26 @@ This is a phone call: short sentences, one question at a time, no lists, no \
 symbols, no markdown.
 """
 
+# After the visit: the same assistant and rules, a different call.
+CHECKIN_STEPS = """\
+HOW THE CALL GOES (this is the recovery check-in after their visit)
+1. Greet them, say you are the automated assistant from {org}, and ask if you \
+are speaking with {first_name}. Say NOTHING about their health until they confirm.
+2. Call confirm_identity with their answer.
+Keep this call SHORT: short sentences, one question at a time, no long explanations.
+3. Call get_care_plan. Ask how they have been feeling since the visit. Wait.
+4. In ONE question, ask if they have had any of the warning signs (name them \
+briefly). Wait.
+5. Call record_checkin with their answers (following_plan true unless they say \
+otherwise). If they report any warning sign, tell them a clinician will call them today.
+6. In one sentence, say what is next (the first next step only), and ask if \
+they have any questions.
+7. Call end_call with a one-sentence summary and say goodbye.
+Steps are a guide, not a script: if they ask something at any point, answer it, \
+then carry on from where you were.
+
+"""
+
 NO_CASE_INSTRUCTIONS = """\
 You are the automated assistant for {org}. The caller has no open screening \
 follow-up with us. Politely say you could not find a follow-up for this number, \
@@ -167,7 +187,10 @@ class CareAgent(Agent):
             instructions = NO_CASE_INSTRUCTIONS.format(org=settings.app.org_name, language=language)
         else:
             who = "We called the patient." if call["direction"] == "outbound" else "The patient called us by tapping the call button in our WhatsApp message."
-            instructions = INSTRUCTIONS.format(
+            fmt = INSTRUCTIONS
+            if case.get("care_plan") and case["status"] in ("follow_up", "escalated"):
+                fmt = fmt[: fmt.index("HOW THE CALL GOES")] + CHECKIN_STEPS + fmt[fmt.index("ANSWERING QUESTIONS") :]
+            instructions = fmt.format(
                 org=settings.app.org_name,
                 language=language,
                 other="English" if lang == "ar" else "Arabic",
@@ -298,6 +321,23 @@ class CareAgent(Agent):
             # booking confirmation stay in the language the patient chose.
             await cases.log_event(self.case_id, "patient", "language_changed", {"to": lang, "channel": "voice", "words": patient_request[:120]})
         return f"Switched. Continue the call in {'Arabic' if lang == 'ar' else 'English'}."
+
+    @function_tool()
+    async def get_care_plan(self, ctx: RunContext) -> str:
+        """Get the patient's care plan after their visit, and where each next step is."""
+        return await voice_tools.get_care_plan(await self._call())
+
+    @function_tool()
+    async def record_checkin(self, ctx: RunContext, feeling: str, following_plan: bool, warning_signs: str = "", notes: str = "") -> str:
+        """Record the recovery check-in answers.
+
+        Args:
+            feeling: How they feel since the visit, in a few words.
+            following_plan: True if they have been able to follow the care plan.
+            warning_signs: Any warning signs they report; empty if none.
+            notes: Anything else the care team should know.
+        """
+        return await voice_tools.record_checkin(await self._call(), feeling, following_plan, warning_signs, notes)
 
     @function_tool()
     async def end_call(self, ctx: RunContext, summary: str) -> str:

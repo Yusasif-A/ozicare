@@ -33,6 +33,13 @@ SERVICES = {
     "colonoscopy": ("Gastroenterology: colonoscopy", "الجهاز الهضمي: تنظير القولون"),
     "breast_diagnostic": ("Breast diagnostic clinic", "عيادة تشخيص الثدي"),
     "pc_review": ("Primary care review", "مراجعة في الرعاية الأولية"),
+    # After the first visit: the other providers a care plan depends on.
+    "histology": ("Pathology lab: biopsy report", "مختبر علم الأمراض: تقرير الخزعة"),
+    "gyn_treatment": ("Gynaecology treatment clinic", "عيادة العلاج النسائي"),
+    "test_of_cure": ("Primary care: HPV test of cure", "الرعاية الأولية: فحص التأكد من الشفاء"),
+    "retinal": ("Diabetic eye screening", "فحص العين لمرضى السكري"),
+    "dietitian": ("Dietitian: nutrition plan", "أخصائي التغذية: خطة غذائية"),
+    "lab_hba1c": ("Lab: repeat HbA1c", "المختبر: إعادة تحليل السكر التراكمي"),
 }
 
 # (pathway, urgency) -> service. Missing urgency falls back to the pathway's
@@ -70,7 +77,7 @@ FACILITIES = [
         "name": {"en": "Abu Dhabi Central Primary Health Centre", "ar": "مركز أبوظبي المركزي للرعاية الصحية الأولية"},
         "address": {"en": "Al Khalidiyah, Abu Dhabi", "ar": "الخالدية، أبوظبي"},
         "region": "abu_dhabi",
-        "services": ["pc_bp_review", "pc_diabetes_prevention", "healthy_weight", "pc_review"],
+        "services": ["pc_bp_review", "pc_diabetes_prevention", "healthy_weight", "pc_review", "test_of_cure", "dietitian", "lab_hba1c"],
         "networks": _ALL,
     },
     {
@@ -78,7 +85,7 @@ FACILITIES = [
         "name": {"en": "Abu Dhabi Specialist Hospital", "ar": "مستشفى أبوظبي التخصصي"},
         "address": {"en": "Al Maqtaa, Abu Dhabi", "ar": "المقطع، أبوظبي"},
         "region": "abu_dhabi",
-        "services": ["urgent_bp", "endocrinology", "colposcopy", "colonoscopy", "breast_diagnostic"],
+        "services": ["urgent_bp", "endocrinology", "colposcopy", "colonoscopy", "breast_diagnostic", "gyn_treatment", "retinal"],
         "networks": _PUBLIC,
     },
     {
@@ -86,7 +93,7 @@ FACILITIES = [
         "name": {"en": "Corniche Women's Health Centre", "ar": "مركز الكورنيش لصحة المرأة"},
         "address": {"en": "Corniche Road, Abu Dhabi", "ar": "شارع الكورنيش، أبوظبي"},
         "region": "abu_dhabi",
-        "services": ["colposcopy", "breast_diagnostic"],
+        "services": ["colposcopy", "breast_diagnostic", "gyn_treatment"],
         "networks": _PRIVATE,
     },
     {
@@ -94,7 +101,7 @@ FACILITIES = [
         "name": {"en": "Al Ain Family Health Centre", "ar": "مركز العين لصحة الأسرة"},
         "address": {"en": "Al Jimi, Al Ain", "ar": "الجيمي، العين"},
         "region": "al_ain",
-        "services": ["pc_bp_review", "pc_diabetes_prevention", "healthy_weight", "pc_review"],
+        "services": ["pc_bp_review", "pc_diabetes_prevention", "healthy_weight", "pc_review", "test_of_cure", "dietitian", "lab_hba1c"],
         "networks": _ALL,
     },
     {
@@ -102,7 +109,7 @@ FACILITIES = [
         "name": {"en": "Al Ain Regional Hospital", "ar": "مستشفى العين الإقليمي"},
         "address": {"en": "Al Mutawaa, Al Ain", "ar": "المطوع، العين"},
         "region": "al_ain",
-        "services": ["urgent_bp", "endocrinology", "colposcopy", "colonoscopy", "breast_diagnostic"],
+        "services": ["urgent_bp", "endocrinology", "colposcopy", "colonoscopy", "breast_diagnostic", "gyn_treatment", "retinal"],
         "networks": _PUBLIC,
     },
     {
@@ -110,7 +117,7 @@ FACILITIES = [
         "name": {"en": "Madinat Zayed Health Centre", "ar": "مركز مدينة زايد الصحي"},
         "address": {"en": "Madinat Zayed, Al Dhafra", "ar": "مدينة زايد، الظفرة"},
         "region": "al_dhafra",
-        "services": ["pc_bp_review", "pc_diabetes_prevention", "healthy_weight", "pc_review", "urgent_bp"],
+        "services": ["pc_bp_review", "pc_diabetes_prevention", "healthy_weight", "pc_review", "urgent_bp", "test_of_cure", "dietitian", "lab_hba1c"],
         "networks": _ALL,
     },
     {
@@ -118,8 +125,24 @@ FACILITIES = [
         "name": {"en": "Ruwais Regional Hospital", "ar": "مستشفى الرويس الإقليمي"},
         "address": {"en": "Ruwais, Al Dhafra", "ar": "الرويس، الظفرة"},
         "region": "al_dhafra",
-        "services": ["endocrinology", "colposcopy", "breast_diagnostic"],
+        "services": ["endocrinology", "colposcopy", "breast_diagnostic", "gyn_treatment", "retinal"],
         "networks": _PUBLIC,
+    },
+    {
+        "id": "FAC-AA-LAB",
+        "name": {"en": "Al Ain Pathology Laboratory", "ar": "مختبر العين لعلم الأمراض"},
+        "address": {"en": "Al Towayya, Al Ain", "ar": "الطوية، العين"},
+        "region": "al_ain",
+        "services": ["histology", "lab_hba1c"],
+        "networks": _ALL,
+    },
+    {
+        "id": "FAC-AD-LAB",
+        "name": {"en": "Abu Dhabi Central Pathology Laboratory", "ar": "مختبر أبوظبي المركزي لعلم الأمراض"},
+        "address": {"en": "Mussafah, Abu Dhabi", "ar": "مصفح، أبوظبي"},
+        "region": "abu_dhabi",
+        "services": ["histology", "lab_hba1c"],
+        "networks": _ALL,
     },
 ]
 FACILITY_BY_ID = {f["id"]: f for f in FACILITIES}

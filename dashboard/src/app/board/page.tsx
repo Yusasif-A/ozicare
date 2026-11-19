@@ -36,7 +36,8 @@ const STAGES = [
   { key: "acknowledged", label: "Engaged" },
   { key: "booked", label: "Booked" },
   { key: "in_care", label: "Attended" },
-  { key: "closed_completed", label: "Completed" },
+  { key: "follow_up", label: "Recovery" },
+  { key: "closed_completed", label: "Closed with evidence" },
 ];
 
 export default function Board() {
@@ -128,7 +129,7 @@ export default function Board() {
 
       <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="mb-3 text-xs font-bold uppercase tracking-wide text-slate-400">The loop right now</div>
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-7">
           {STAGES.map((s, i) => (
             <div key={s.key} className="relative">
               <div className={`rounded-xl px-3 py-3 ${i === STAGES.length - 1 ? "bg-emerald-50" : "bg-teal-50/60"}`}>
